@@ -1,0 +1,24 @@
+## Compilaciones y carpetas temporales de .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+
+## Base de datos SQLite y PDFs generados localmente
+jobs.db
+jobs.db-journal
+jobs.db-shm
+jobs.db-wal
+GeneratedCVs/
+*.pdf
+*.typ
+
+## Configuración y secretos (CRÍTICO: nunca subir credenciales)
+appsettings.json
+appsettings.Development.json
+.env
+
+# Mantener solo la plantilla de ejemplo
+!appsettings.example.json
