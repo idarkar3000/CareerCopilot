@@ -29,7 +29,7 @@ public class CvCompilerService
 
         var cleanJob = SanitizeFileName(job.Title);
         var cleanCompany = SanitizeFileName(job.Company);
-        var baseFileName = $"CV_{cleanJob}_{cleanCompany}_Adrian_Espinola";
+        var baseFileName = $"CV_{cleanJob}_Adrián_Espínola_Gumiel";
 
         var typstFile = Path.Combine(outputDir, $"{baseFileName}.typ");
         var pdfFile = Path.Combine(outputDir, $"{baseFileName}.pdf");
