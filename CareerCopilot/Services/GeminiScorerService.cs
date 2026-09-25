@@ -26,7 +26,7 @@ public class GeminiScorerService
             return null;
         }
 
-        var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={_config.GeminiApiKey}";
+        var endpoint = $"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={_config.GeminiApiKey}";
 
         var prompt = $@"
 Eres un reclutador técnico experto en perfiles .NET y C#.
