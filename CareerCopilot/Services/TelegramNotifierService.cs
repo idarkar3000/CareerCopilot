@@ -15,19 +15,22 @@ public class TelegramNotifierService
     private readonly ILogger<TelegramNotifierService> _logger;
     private readonly GeminiScorerService _scorer;
     private readonly CvCompilerService _cvCompiler;
+    private readonly Func<string?, Task>? _triggerScanAction;
 
     public TelegramNotifierService(
         BotConfig config,
         JobDatabase db,
         ILogger<TelegramNotifierService> logger,
         GeminiScorerService scorer,
-        CvCompilerService cvCompiler)
+        CvCompilerService cvCompiler,
+        Func<string?, Task>? triggerScanAction = null)
     {
         _config = config;
         _db = db;
         _logger = logger;
         _scorer = scorer;
         _cvCompiler = cvCompiler;
+        _triggerScanAction = triggerScanAction;
         _botClient = new TelegramBotClient(_config.TelegramBotToken);
     }
 
@@ -55,6 +58,7 @@ public class TelegramNotifierService
 
         var parts = messageText.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
         var command = parts[0].ToLowerInvariant();
+        if (command.Contains('@')) command = command.Split('@')[0];
         var argument = parts.Length > 1 ? parts[1].Trim() : string.Empty;
 
         switch (command)
@@ -80,6 +84,31 @@ public class TelegramNotifierService
 
                 var pdf = await _cvCompiler.GeneratePdfAsync(mockJob, eval, ct);
                 await SendNotificationAsync(mockJob, eval, pdf, ct);
+                break;
+
+            case "/run":
+                await bot.SendTextMessageAsync(message.Chat.Id, "🚀 Disparando ciclo completo de búsqueda y análisis...", cancellationToken: ct);
+                if (_triggerScanAction != null)
+                {
+                    _ = Task.Run(async () => await _triggerScanAction(null), ct);
+                }
+                else
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, "ℹ️ Acción de rastreo inmediato en segundo plano.", cancellationToken: ct);
+                }
+                break;
+
+            case "/scan":
+                if (string.IsNullOrWhiteSpace(argument))
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/scan <término>`\nEjemplo: `/scan wpf developer`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    return;
+                }
+                await bot.SendTextMessageAsync(message.Chat.Id, $"🔎 Escaneando vacantes para: *{EscapeMarkdown(argument)}*...", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                if (_triggerScanAction != null)
+                {
+                    _ = Task.Run(async () => await _triggerScanAction(argument), ct);
+                }
                 break;
 
             case "/addjob":
@@ -118,15 +147,129 @@ public class TelegramNotifierService
                 await bot.SendTextMessageAsync(message.Chat.Id, listText, parseMode: ParseMode.Markdown, cancellationToken: ct);
                 break;
 
+            case "/addrequired":
+                if (string.IsNullOrWhiteSpace(argument))
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/addrequired <palabra>`\nEjemplo: `/addrequired .net`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    return;
+                }
+                var reqKey = argument.ToLowerInvariant();
+                if (!_config.RequiredKeywords.Contains(reqKey))
+                {
+                    _config.RequiredKeywords.Add(reqKey);
+                    await bot.SendTextMessageAsync(message.Chat.Id, $"🔒 Palabra requerida añadida: *{EscapeMarkdown(reqKey)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                }
+                else
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, $"ℹ️ *{EscapeMarkdown(reqKey)}* ya estaba en la lista de requeridas.", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                }
+                break;
+
+            case "/removerequired":
+                if (string.IsNullOrWhiteSpace(argument))
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/removerequired <palabra>`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    return;
+                }
+                var remReq = argument.ToLowerInvariant();
+                var reqRemoved = _config.RequiredKeywords.Remove(remReq);
+                await bot.SendTextMessageAsync(message.Chat.Id, reqRemoved
+                    ? $"🔓 Palabra requerida retirada: *{EscapeMarkdown(remReq)}*"
+                    : $"⚠️ No se encontró: *{EscapeMarkdown(remReq)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "/addexcluded":
+                if (string.IsNullOrWhiteSpace(argument))
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/addexcluded <palabra>`\nEjemplo: `/addexcluded senior`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    return;
+                }
+                var excKey = argument.ToLowerInvariant();
+                if (!_config.ExcludedKeywords.Contains(excKey))
+                {
+                    _config.ExcludedKeywords.Add(excKey);
+                    await bot.SendTextMessageAsync(message.Chat.Id, $"🚫 Palabra de exclusión añadida: *{EscapeMarkdown(excKey)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                }
+                else
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, $"ℹ️ *{EscapeMarkdown(excKey)}* ya estaba en la lista de exclusiones.", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                }
+                break;
+
+            case "/removeexcluded":
+                if (string.IsNullOrWhiteSpace(argument))
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/removeexcluded <palabra>`", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    return;
+                }
+                var remExc = argument.ToLowerInvariant();
+                var excRemoved = _config.ExcludedKeywords.Remove(remExc);
+                await bot.SendTextMessageAsync(message.Chat.Id, excRemoved
+                    ? $"✅ Palabra de exclusión eliminada: *{EscapeMarkdown(remExc)}*"
+                    : $"⚠️ No se encontró: *{EscapeMarkdown(remExc)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "/filters":
+                var reqs = _config.RequiredKeywords.Any() ? string.Join(", ", _config.RequiredKeywords.Select(r => $"`{EscapeMarkdown(r)}`")) : "_Ninguna_";
+                var excs = _config.ExcludedKeywords.Any() ? string.Join(", ", _config.ExcludedKeywords.Select(e => $"`{EscapeMarkdown(e)}`")) : "_Ninguna_";
+                var filterMsg = $"⚙️ *Filtros de Palabras Clave:*\n\n🔒 *Obligatorias:* {reqs}\n🚫 *Excluidas:* {excs}";
+                await bot.SendTextMessageAsync(message.Chat.Id, filterMsg, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            case "/threshold":
+                if (int.TryParse(argument, out var score) && score >= 0 && score <= 100)
+                {
+                    _config.MinScoreThreshold = score;
+                    await bot.SendTextMessageAsync(message.Chat.Id, $"🎯 Umbral mínimo de afinidad actualizado a: *{score}/100*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                }
+                else
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, $"⚠️ Introduce un valor entero de 0 a 100.\nUmbral actual: *{_config.MinScoreThreshold}/100*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                }
+                break;
+
+            case "/status":
+                var activeQueries = _db.GetSearchQueries();
+                var statusMsg =
+                    $"📊 *Estado del Bot:*\n\n" +
+                    $"• *Búsquedas activas:* {activeQueries.Count}\n" +
+                    $"• *Keywords obligatorias:* {_config.RequiredKeywords.Count}\n" +
+                    $"• *Keywords excluidas:* {_config.ExcludedKeywords.Count}\n" +
+                    $"• *Umbral Gemini:* {_config.MinScoreThreshold}/100\n" +
+                    $"• *Intervalo:* cada {_config.CheckIntervalMinutes} min";
+                await bot.SendTextMessageAsync(message.Chat.Id, statusMsg, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
             case "/help":
             case "/start":
-                var helpText = @"🤖 *Comandos disponibles:*
-• `/test` — Prueba inmediata (evalúa una oferta ficticia con Gemini y te manda el PDF).
-• `/addjob <texto>` — Añadir un nuevo título/búsqueda.
-• `/removejob <texto>` — Eliminar una búsqueda.
-• `/listjobs` — Ver todas las búsquedas activas.
-• `/help` — Mostrar este mensaje.";
+                var helpText = @"🤖 *Panel de Control - CareerCopilot*
+
+*Operativa de Búsqueda:*
+• `/run` — Disparar rastreo completo inmediatamente.
+• `/scan <término>` — Buscar ofertas puntuales sin añadirlas a la lista recurrente.
+• `/test` — Probar pipeline con Gemini y Typst compilando un CV ficticio.
+
+*Gestión de Búsquedas:*
+• `/addjob <término>` — Añadir término de búsqueda recurrente.
+• `/removejob <término>` — Eliminar término de búsqueda recurrente.
+• `/listjobs` — Listar todos los términos de búsqueda activos.
+
+*Filtros y Puntuación:*
+• `/addrequired <palabra>` — Añadir palabra técnica obligatoria (.net, c#).
+• `/removerequired <palabra>` — Quitar palabra obligatoria.
+• `/addexcluded <palabra>` — Añadir palabra a descartar (senior, lead).
+• `/removeexcluded <palabra>` — Quitar palabra de descarte.
+• `/filters` — Ver las palabras obligatorias y excluidas activas.
+• `/threshold <0-100>` — Modificar corte de afinidad para generar CV.
+
+*General:*
+• `/status` — Resumen general de métricas y filtros.
+• `/help` — Mostrar esta ayuda.";
                 await bot.SendTextMessageAsync(message.Chat.Id, helpText, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                break;
+
+            default:
+                await bot.SendTextMessageAsync(message.Chat.Id, "❓ Comando no reconocido. Usa `/help` para ver la lista de comandos disponibles.", parseMode: ParseMode.Markdown, cancellationToken: ct);
                 break;
         }
     }
