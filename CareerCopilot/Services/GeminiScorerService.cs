@@ -16,16 +16,11 @@ public class GeminiScorerService
         PropertyNameCaseInsensitive = true
     };
 
-    // Modelos vigentes a día de hoy. Si vuelves a ver 404 en todos, comprueba
-    // https://ai.google.dev/gemini-api/docs/models antes de asumir otro bug:
-    // el catálogo de Gemini cambia con mucha frecuencia.
     private static readonly string[] ActiveModels =
     {
-        "gemini-3.8-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-2.5-flash"
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash"
     };
 
     public GeminiScorerService(HttpClient http, BotConfig config, ILogger<GeminiScorerService> logger)
@@ -64,8 +59,6 @@ public class GeminiScorerService
                         return result;
                     }
 
-                    // JSON válido en el sobre de la API pero contenido inválido/incompleto:
-                    // probamos el siguiente modelo en vez de devolver un resultado a medias.
                     continue;
                 }
 
@@ -93,10 +86,10 @@ public class GeminiScorerService
     private object BuildRequestPayload(JobOffer job)
     {
         var prompt = $$"""
-Actúa como un selector técnico senior y experto en filtros ATS.
-Evalúa la compatibilidad del candidato con la oferta y redacta las viñetas del currículum ADAPTADAS a esta vacante concreta.
+Actúa como un selector técnico senior y preparador de CVs técnicos en .NET y C#.
+Evalúa la compatibilidad del candidato con la oferta y redacta las secciones adaptadas del currículum.
 
-PERFIL BASE DEL CANDIDATO (única fuente de verdad sobre su experiencia real):
+PERFIL BASE DEL CANDIDATO (ÚNICA FUENTE DE VERDAD):
 {{_config.CandidateProfile}}
 
 OFERTA DE TRABAJO:
@@ -105,33 +98,21 @@ Empresa: {{job.Company}}
 Descripción / Requisitos:
 {{job.Description}}
 
-REGLA DE ORO — ANTI-ALUCINACIÓN (la más importante de todas):
-Todo lo que escribas en 'tailoredSummary' y 'tailoredExperience' debe basarse EXCLUSIVAMENTE en hechos,
-tecnologías, proyectos y logros que aparezcan literalmente en el PERFIL BASE DEL CANDIDATO de arriba.
-Está PROHIBIDO inventar tecnologías, empresas, proyectos, certificaciones, cifras o logros que no figuren
-en ese perfil. Tu trabajo NO es inventar contenido nuevo: es SELECCIONAR, PRIORIZAR y REFORMULAR los
-logros reales del candidato para resaltar los que mejor encajen con esta oferta concreta. Si la oferta pide
-algo que el candidato no tiene, no lo añadas a las viñetas; refléjalo en 'concerns' en su lugar.
+REGLAS DE ORO CONTRA ALUCINACIONES:
+1. Todo lo que redactes en 'tailoredSummary' y 'tailoredExperience' debe basarse ESTRICTAMENTE en datos presentes en el PERFIL BASE.
+2. PROHIBIDO inventar cifras cuantitativas de rendimiento (ej: 'reducción de 60s a 10s', porcentajes ficticios) o tecnologías que no domine.
+3. REGLA DE AISLAMIENTO: Las viñetas de 'tailoredExperience' pertenecen EXCLUSIVAMENTE a las responsabilidades en EPAM Neoris (Backend, Microservicios, CQRS, Minimal APIs, SQL Server con Dapper, Mapster, Angular, xUnit). NUNCA traslades tareas de proyectos personales como Pdf_Signer (WPF, firmas manuscritas, visores PDF) o RadarChollos a la experiencia laboral de EPAM Neoris.
+4. Si la vacante exige herramientas no presentes en el perfil (ej. Java, PHP, AWS avanzado, React), refléjalas honestamente en 'concerns'.
 
 REGLAS DE REDACCIÓN:
-1. NIVEL PROFESIONAL: el candidato es un Desarrollador Backend JUNIOR que completó sus prácticas en
-   EPAM Neoris. NUNCA digas que es 'Senior' ni que 'Lideró' o 'Dirigió' proyectos. Usa verbos en primera
-   persona de ejecución y colaboración: 'Participé en', 'Implementé', 'Desarrollé', 'Refactoricé',
-   'Optimicé', 'Colaboré en'.
-2. 'score': entero de 0 a 100 evaluando la afinidad técnica real con el puesto, según el perfil base.
-3. 'match': true si score >= {{_config.MinScoreThreshold}}, false en caso contrario.
-4. 'strengths': exactamente 3 puntos fuertes técnicos del candidato, tomados de su perfil base, que
-   estén alineados con esta vacante.
-5. 'concerns': 1 o 2 requisitos que pida la vacante y que el candidato no cubra o deba reforzar según su
-   perfil base (sé honesto, no minimices carencias reales).
-6. 'tailoredSummary': resumen profesional de EXACTAMENTE 3 o 4 líneas (entre 230 y 310 caracteres),
-   presentando al candidato como Desarrollador Backend Junior especializado en .NET, C# y bases de datos
-   relacionales, priorizando en la redacción los aspectos de su perfil base más relevantes para ESTA
-   oferta. No uses corchetes '[' ni ']'.
-7. 'tailoredExperience': EXACTAMENTE 4 viñetas (entre 120 y 160 caracteres cada una), extraídas y
-   reformuladas a partir de las tareas y logros REALES descritos en el perfil base. Elige las 4 que mejor
-   conecten con los requisitos de la vacante; no reutilices siempre las mismas si hay otras más relevantes
-   en el perfil base. No uses corchetes '[' ni ']'.
+1. VOZ Y TONO ESTRICTOS: Tanto 'tailoredSummary' como 'tailoredExperience' DEBEN ESTAR ESCRITOS EN PRIMERA PERSONA DEL SINGULAR ("Soy desarrollador backend...", "Cuento con experiencia en...", "Implementé...", "Diseñé..."). NUNCA hables en tercera persona ("Ingeniero de software que aporta...", "El candidato cuenta con...").
+2. NIVEL PROFESIONAL: El candidato es un Desarrollador Backend JUNIOR con prácticas finalizadas. Emplea verbos directos de ejecución técnica ("Desarrollé", "Configuré", "Implementé", "Optimicé").
+3. 'score': Entero de 0 a 100 evaluando afinidad técnica real.
+4. 'match': true si score >= {{_config.MinScoreThreshold}}, false en caso contrario.
+5. 'strengths': Exactamente 3 puntos fuertes técnicos reales alineados con la oferta.
+6. 'concerns': 1 o 2 requisitos que pida la oferta y el candidato no posea o deba reforzar.
+7. 'tailoredSummary': Resumen profesional escrito en PRIMERA PERSONA ("Soy...", "Aporto..."), fluido, sólido y continuo de 4 a 6 líneas (ENTRE 500 Y 700 CARACTERES). Debe exponer tu base en C#, ASP.NET Core, microservicios, bases de datos relacionales y cómo encajas con la vacante. No uses corchetes '[' ni ']'.
+8. 'tailoredExperience': EXACTAMENTE 4 viñetas técnicas redactadas en primera persona ("Diseñé...", "Implementé...", "Configuré...") de ENTRE 150 Y 210 CARACTERES cada una, adaptadas de las responsabilidades reales en EPAM Neoris. No uses corchetes '[' ni ']'.
 """;
 
         return new
@@ -170,13 +151,13 @@ REGLAS DE REDACCIÓN:
 
             if (candidate == null)
             {
-                _logger.LogWarning("Modelo {Model}: respuesta sin 'candidates' (posible bloqueo de seguridad).", model);
+                _logger.LogWarning("Modelo {Model}: respuesta sin 'candidates' (posible filtro de seguridad).", model);
                 return null;
             }
 
             if (candidate.FinishReason is { } fr && fr != "STOP")
             {
-                _logger.LogWarning("Modelo {Model} terminó con finishReason={Reason} (posible corte o filtro).", model, fr);
+                _logger.LogWarning("Modelo {Model} finalizó con finishReason={Reason}.", model, fr);
             }
 
             var rawJsonText = candidate.Content?.Parts?.FirstOrDefault()?.Text;
@@ -202,11 +183,6 @@ REGLAS DE REDACCIÓN:
         }
     }
 
-    /// <summary>
-    /// No confiamos ciegamente en que la IA haya seguido las reglas al pie de la letra: validamos
-    /// lo mínimo imprescindible para que CvCompilerService reciba datos coherentes, y recalculamos
-    /// 'match' nosotros mismos en vez de fiarnos del booleano devuelto por el modelo.
-    /// </summary>
     private EvaluationResult ValidateAndNormalize(EvaluationResult result, string model)
     {
         result.Score = Math.Clamp(result.Score, 0, 100);
@@ -220,7 +196,7 @@ REGLAS DE REDACCIÓN:
         result.TailoredExperience ??= new List<string>();
         if (result.TailoredExperience.Count == 0)
         {
-            _logger.LogWarning("Modelo {Model}: 'tailoredExperience' vacío; el CV usará contenido de reserva.", model);
+            _logger.LogWarning("Modelo {Model}: 'tailoredExperience' vacío; se utilizará fallback en compilación.", model);
         }
 
         result.Strengths ??= new List<string>();
