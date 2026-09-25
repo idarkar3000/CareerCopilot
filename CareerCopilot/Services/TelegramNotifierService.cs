@@ -1,4 +1,5 @@
 ﻿using Telegram.Bot;
+using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
@@ -20,6 +21,12 @@ public class TelegramNotifierService
     private bool _isReceiving = false;
     private readonly object _lock = new();
 
+    // Estado para distinguir un 409 Conflict transitorio (solape de deploy) de uno persistente
+    // (otra instancia real corriendo con el mismo token).
+    private int _consecutiveConflicts;
+    private DateTime? _firstConflictAt;
+    private static readonly TimeSpan ConflictEscalationWindow = TimeSpan.FromSeconds(90);
+
     public TelegramNotifierService(
         BotConfig config,
         JobDatabase db,
@@ -37,7 +44,13 @@ public class TelegramNotifierService
         _botClient = new TelegramBotClient(_config.TelegramBotToken);
     }
 
-    public void StartReceiving(CancellationToken ct)
+    /// <summary>
+    /// Antes se llamaba StartReceiving (síncrono). Ahora es async porque primero
+    /// verifica/borra un posible webhook residual antes de arrancar el long polling.
+    /// Actualiza el punto de llamada (Worker.cs / Program.cs) a:
+    ///   await telegramNotifier.StartReceivingAsync(ct);
+    /// </summary>
+    public async Task StartReceivingAsync(CancellationToken ct)
     {
         lock (_lock)
         {
@@ -47,6 +60,19 @@ public class TelegramNotifierService
                 return;
             }
             _isReceiving = true;
+        }
+
+        try
+        {
+            // Defensivo: si quedó un webhook configurado de una prueba anterior (setWebhook),
+            // compite con el long polling y provoca conflictos espurios en getUpdates.
+            // dropPendingUpdates evita procesar de golpe mensajes acumulados mientras el bot
+            // estuvo caído (por ejemplo, durante un redeploy).
+            await _botClient.DeleteWebhookAsync(dropPendingUpdates: true, cancellationToken: ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "No se pudo verificar/borrar el webhook de Telegram antes de iniciar el polling (no crítico, se continúa).");
         }
 
         var receiverOptions = new ReceiverOptions
@@ -289,6 +315,38 @@ public class TelegramNotifierService
 
     private Task HandleErrorAsync(ITelegramBotClient bot, Exception ex, CancellationToken ct)
     {
+        if (ex is ApiRequestException { ErrorCode: 409 })
+        {
+            _consecutiveConflicts++;
+            _firstConflictAt ??= DateTime.UtcNow;
+            var elapsed = DateTime.UtcNow - _firstConflictAt.Value;
+
+            if (elapsed < ConflictEscalationWindow)
+            {
+                _logger.LogWarning(
+                    "Conflicto 409 de Telegram getUpdates (intento {N}, {Elapsed:F0}s transcurridos). " +
+                    "Probablemente solape de instancias durante un redeploy; debería resolverse solo.",
+                    _consecutiveConflicts, elapsed.TotalSeconds);
+            }
+            else
+            {
+                _logger.LogError(
+                    "Conflicto 409 de Telegram getUpdates persiste desde hace {Elapsed:F0}s ({N} intentos). " +
+                    "Esto normalmente indica que hay OTRA instancia real usando el mismo TELEGRAM_BOT_TOKEN " +
+                    "(otro deploy activo en Render, una ejecución en local, o un webhook activo). Revisa procesos duplicados.",
+                    elapsed.TotalSeconds, _consecutiveConflicts);
+            }
+
+            // Backoff progresivo (máx. 30s) para no martillear la API de Telegram mientras el
+            // conflicto se resuelve por sí solo; el propio receptor de Telegram.Bot reintentará
+            // después de este delay.
+            return Task.Delay(TimeSpan.FromSeconds(Math.Min(5 * _consecutiveConflicts, 30)), ct);
+        }
+
+        // Cualquier error que no sea un 409 reinicia el contador de conflictos.
+        _consecutiveConflicts = 0;
+        _firstConflictAt = null;
+
         _logger.LogError(ex, "Error en Telegram Polling.");
         return Task.CompletedTask;
     }
