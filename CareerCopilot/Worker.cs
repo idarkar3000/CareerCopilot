@@ -36,7 +36,11 @@ public class Worker : BackgroundService
         _logger.LogInformation("CareerCopilot Worker iniciado.");
 
         _db.SeedDefaultQueries(_config.SearchQueries);
-        _notifier.StartReceiving(stoppingToken);
+
+        // StartReceiving -> StartReceivingAsync: ahora borra un posible webhook residual
+        // antes de arrancar el long polling. No bloquea el resto del Worker: internamente
+        // arranca su propio bucle de recepción en segundo plano.
+        await _notifier.StartReceivingAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -72,6 +76,12 @@ public class Worker : BackgroundService
         _logger.LogInformation(">>> [Tecnoempleo] Obtenidas: {Count} ofertas", tecnoTotal);
 
         // 2. Adzuna API
+        // OJO: el tier gratuito de Adzuna es limitado (varía según el plan que te haya
+        // asignado el registro, del orden de unos pocos miles de llamadas/mes). Con 2
+        // queries por ciclo y un CheckIntervalMinutes agresivo (p.ej. cada 60 min = 48
+        // llamadas/día) puedes acercarte al límite mensual. Si empiezas a ver 429 aquí,
+        // sube CheckIntervalMinutes o reduce las queries de Adzuna antes de pedir un plan
+        // de pago.
         var adzunaQueries = new[] { "c# junior", ".net junior" };
         var adzunaTotal = 0;
         foreach (var aq in adzunaQueries)
@@ -131,8 +141,16 @@ public class Worker : BackgroundService
 
             if (eval == null)
             {
-                _logger.LogWarning("Gemini devolvió respuesta vacía o no disponible.");
-                _db.MarkAsProcessed(offer.Id, offer.Title, offer.Company, 0);
+                // IMPORTANTE: a propósito NO se llama a _db.MarkAsProcessed aquí.
+                // Un fallo de Gemini (404 de modelo, 429/503 transitorio, corte de red...)
+                // no significa que la oferta no encaje: significa que no hemos podido
+                // evaluarla todavía. Si la marcáramos como procesada, quedaría enterrada
+                // para siempre en SQLite aunque el problema de Gemini se resuelva al
+                // minuto siguiente. Al no marcarla, se reintentará en el próximo ciclo
+                // (dentro de {Minutes} min).
+                _logger.LogWarning(
+                    "Gemini no pudo evaluar '{Title}' (respuesta vacía o no disponible); se reintentará en el próximo ciclo.",
+                    offer.Title);
                 continue;
             }
 
