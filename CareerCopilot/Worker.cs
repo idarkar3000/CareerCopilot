@@ -36,6 +36,8 @@ public class Worker : BackgroundService
         _logger.LogInformation("CareerCopilot Worker iniciado.");
 
         _db.SeedDefaultQueries(_config.SearchQueries);
+
+        // StartReceiving ya cuenta con seguro de ejecución única
         _notifier.StartReceiving(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -54,7 +56,7 @@ public class Worker : BackgroundService
         }
     }
 
-    private async Task RunPipelineAsync(CancellationToken ct)
+    public async Task RunPipelineAsync(CancellationToken ct)
     {
         var allOffers = new List<JobOffer>();
 
@@ -71,7 +73,7 @@ public class Worker : BackgroundService
         }
         _logger.LogInformation(">>> [Tecnoempleo] Obtenidas: {Count} ofertas", tecnoTotal);
 
-        // 2. Adzuna API (Integración activa)
+        // 2. Adzuna API
         var adzunaQueries = new[] { "c# junior", ".net junior" };
         var adzunaTotal = 0;
         foreach (var aq in adzunaQueries)
@@ -136,17 +138,18 @@ public class Worker : BackgroundService
                 continue;
             }
 
-            _logger.LogInformation("Gemini score: {Score}/100 (Match: {Match})", eval.Score, eval.Match);
+            _logger.LogInformation("Gemini score: {Score}/100", eval.Score);
             _db.MarkAsProcessed(offer.Id, offer.Title, offer.Company, eval.Score);
 
-            if (eval.Match && eval.Score >= _config.MinScoreThreshold)
+            // Se notifica si supera el umbral configurado
+            if (eval.Score >= _config.MinScoreThreshold)
             {
                 _logger.LogInformation("¡SUPERÓ EL UMBRAL ({Score})! Compilando PDF en Typst...", eval.Score);
                 var pdfPath = await _cvCompiler.GeneratePdfAsync(offer, eval, ct);
 
                 if (string.IsNullOrEmpty(pdfPath))
                 {
-                    _logger.LogError("Fallo al compilar el PDF con Typst. Comprueba si 'typst' está instalado y en el PATH del sistema.");
+                    _logger.LogError("Fallo al compilar el PDF con Typst. Comprueba si 'typst' está instalado.");
                 }
 
                 _logger.LogInformation("Enviando notificación a Telegram...");
@@ -154,7 +157,7 @@ public class Worker : BackgroundService
                 _logger.LogInformation("¡Notificación enviada!");
             }
 
-            await Task.Delay(6000, ct);
+            await Task.Delay(5000, ct);
         }
     }
 
@@ -162,12 +165,20 @@ public class Worker : BackgroundService
     {
         var text = $"{offer.Title} {offer.Description}".ToLowerInvariant();
 
-        var matchesTech = _config.RequiredKeywords.Any(kw => text.Contains(kw.ToLowerInvariant()));
-        if (!matchesTech) return false;
+        // Si hay palabras obligatorias configuradas, debe contener al menos una
+        if (_config.RequiredKeywords != null && _config.RequiredKeywords.Any())
+        {
+            var matchesTech = _config.RequiredKeywords.Any(kw => text.Contains(kw.ToLowerInvariant()));
+            if (!matchesTech) return false;
+        }
 
+        // Si contiene alguna de las palabras excluidas en el título, se descarta
         var titleLower = offer.Title.ToLowerInvariant();
-        var isExcluded = _config.ExcludedKeywords.Any(kw => titleLower.Contains(kw.ToLowerInvariant()));
-        if (isExcluded) return false;
+        if (_config.ExcludedKeywords != null && _config.ExcludedKeywords.Any())
+        {
+            var isExcluded = _config.ExcludedKeywords.Any(kw => titleLower.Contains(kw.ToLowerInvariant()));
+            if (isExcluded) return false;
+        }
 
         return true;
     }

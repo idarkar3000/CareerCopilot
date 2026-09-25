@@ -7,17 +7,17 @@ var builder = WebApplication.CreateBuilder(args);
 // Configuración leída de appsettings.json y Variables de Entorno (Render)
 var botConfig = builder.Configuration.GetSection("BotConfig").Get<BotConfig>() ?? new BotConfig();
 
-// Inyección de servicios en el contenedor de dependencias
+// Inyección de dependencias
 builder.Services.AddSingleton(botConfig);
 builder.Services.AddSingleton<JobDatabase>();
 builder.Services.AddHttpClient<JobScraperService>();
 builder.Services.AddHttpClient<GeminiScorerService>();
 builder.Services.AddSingleton<CvCompilerService>();
 
-// Registramos TelegramNotifierService como Singleton para que Worker pueda usarlo
+// Registramos TelegramNotifierService como Singleton (lo consume Worker)
 builder.Services.AddSingleton<TelegramNotifierService>();
 
-// Worker periódico en segundo plano
+// Worker en segundo plano (se encarga de arrancar el pipeline y el listener de Telegram)
 builder.Services.AddHostedService<Worker>();
 
 var app = builder.Build();
@@ -31,10 +31,5 @@ app.MapMethods("/", new[] { "GET", "HEAD" }, () => Results.Ok(new
 }));
 
 app.MapMethods("/health", new[] { "GET", "HEAD" }, () => Results.Ok("OK"));
-
-// Iniciar el listener de Telegram Polling para comandos
-var telegramService = app.Services.GetRequiredService<TelegramNotifierService>();
-var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
-telegramService.StartReceiving(lifetime.ApplicationStopping);
 
 app.Run();

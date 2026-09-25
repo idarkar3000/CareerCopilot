@@ -34,19 +34,19 @@ public class TelegramNotifierService
         _botClient = new TelegramBotClient(_config.TelegramBotToken);
     }
 
-    public void StartReceiving(CancellationToken ct)
-    {
-        var receiverOptions = new ReceiverOptions
+        public void StartReceiving(CancellationToken ct)
         {
-            AllowedUpdates = new[] { UpdateType.Message }
-        };
+            var receiverOptions = new ReceiverOptions
+            {
+                AllowedUpdates = new[] { UpdateType.Message }
+            };
 
-        _botClient.StartReceiving(
-            updateHandler: HandleUpdateAsync,
-            pollingErrorHandler: HandleErrorAsync,
-            receiverOptions: receiverOptions,
-            cancellationToken: ct
-        );
+            _botClient.StartReceiving(
+                updateHandler: HandleUpdateAsync,
+                pollingErrorHandler: HandleErrorAsync,
+                receiverOptions: receiverOptions,
+                cancellationToken: ct
+            );
 
         _logger.LogInformation("Escuchador de comandos de Telegram iniciado.");
     }
