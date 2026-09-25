@@ -17,6 +17,9 @@ public class TelegramNotifierService
     private readonly CvCompilerService _cvCompiler;
     private readonly Func<string?, Task>? _triggerScanAction;
 
+    private bool _isReceiving = false;
+    private readonly object _lock = new();
+
     public TelegramNotifierService(
         BotConfig config,
         JobDatabase db,
@@ -34,19 +37,29 @@ public class TelegramNotifierService
         _botClient = new TelegramBotClient(_config.TelegramBotToken);
     }
 
-        public void StartReceiving(CancellationToken ct)
+    public void StartReceiving(CancellationToken ct)
+    {
+        lock (_lock)
         {
-            var receiverOptions = new ReceiverOptions
+            if (_isReceiving)
             {
-                AllowedUpdates = new[] { UpdateType.Message }
-            };
+                _logger.LogWarning("StartReceiving invocado, pero el bot ya está recibiendo actualizaciones. Ignorando llamada duplicada.");
+                return;
+            }
+            _isReceiving = true;
+        }
 
-            _botClient.StartReceiving(
-                updateHandler: HandleUpdateAsync,
-                pollingErrorHandler: HandleErrorAsync,
-                receiverOptions: receiverOptions,
-                cancellationToken: ct
-            );
+        var receiverOptions = new ReceiverOptions
+        {
+            AllowedUpdates = new[] { UpdateType.Message }
+        };
+
+        _botClient.StartReceiving(
+            updateHandler: HandleUpdateAsync,
+            pollingErrorHandler: HandleErrorAsync,
+            receiverOptions: receiverOptions,
+            cancellationToken: ct
+        );
 
         _logger.LogInformation("Escuchador de comandos de Telegram iniciado.");
     }
@@ -78,7 +91,7 @@ public class TelegramNotifierService
                 var eval = await _scorer.EvaluateAsync(mockJob, ct);
                 if (eval == null)
                 {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "❌ Error: Gemini devolvió nulo. Revisa la API Key.", cancellationToken: ct);
+                    await bot.SendTextMessageAsync(message.Chat.Id, "❌ Error: Gemini devolvió nulo. Revisa la API Key o logs.", cancellationToken: ct);
                     return;
                 }
 

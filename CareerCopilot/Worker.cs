@@ -36,8 +36,6 @@ public class Worker : BackgroundService
         _logger.LogInformation("CareerCopilot Worker iniciado.");
 
         _db.SeedDefaultQueries(_config.SearchQueries);
-
-        // StartReceiving ya cuenta con seguro de ejecución única
         _notifier.StartReceiving(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -141,7 +139,6 @@ public class Worker : BackgroundService
             _logger.LogInformation("Gemini score: {Score}/100", eval.Score);
             _db.MarkAsProcessed(offer.Id, offer.Title, offer.Company, eval.Score);
 
-            // Se notifica si supera el umbral configurado
             if (eval.Score >= _config.MinScoreThreshold)
             {
                 _logger.LogInformation("¡SUPERÓ EL UMBRAL ({Score})! Compilando PDF en Typst...", eval.Score);
@@ -165,7 +162,7 @@ public class Worker : BackgroundService
     {
         var text = $"{offer.Title} {offer.Description}".ToLowerInvariant();
 
-        // Si hay palabras obligatorias configuradas, debe contener al menos una
+        // Si se han configurado palabras obligatorias, debe cumplir al menos una
         if (_config.RequiredKeywords != null && _config.RequiredKeywords.Any())
         {
             var matchesTech = _config.RequiredKeywords.Any(kw => text.Contains(kw.ToLowerInvariant()));
