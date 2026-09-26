@@ -1,6 +1,7 @@
 ﻿using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using CareerCopilot.Models;
 using Microsoft.Extensions.Configuration;
 
@@ -10,13 +11,15 @@ public class JobScraperService
 {
     private readonly HttpClient _http;
     private readonly ILogger<JobScraperService> _logger;
+    private readonly BotConfig _config;
     private readonly string? _adzunaAppId;
     private readonly string? _adzunaAppKey;
 
-    public JobScraperService(HttpClient http, ILogger<JobScraperService> logger, IConfiguration configuration)
+    public JobScraperService(HttpClient http, ILogger<JobScraperService> logger, IConfiguration configuration, BotConfig config)
     {
         _http = http;
         _logger = logger;
+        _config = config;
 
         // appsettings.json:
         // "JobSources": { "Adzuna": { "AppId": "...", "AppKey": "..." } }
@@ -247,6 +250,150 @@ public class JobScraperService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Aviso consultando Adzuna API para '{Query}'.", query);
+        }
+
+        return list;
+    }
+
+    // --- 5. INFOJOBS API (portal líder en España; usa InfoJobsClientId/ClientSecret de BotConfig) ---
+    // Regístrate en https://developer.infojobs.net/ para obtener credenciales gratuitas.
+    // Autenticación: HTTP Basic con "ClientId:ClientSecret" en base64 — la búsqueda pública de
+    // ofertas no requiere el intercambio OAuth2 completo.
+    //
+    // OJO: los nombres de campo del JSON ('offers', 'author.name', 'link', 'requirementMin')
+    // están tomados de la documentación pública y de clientes de terceros, no de una llamada
+    // real verificada por mí. Si ves que devuelve 0 resultados con credenciales correctas,
+    // sube el nivel de log a Debug y loguea 'json' una vez para confirmar el esquema real de
+    // tu respuesta, y ajustamos los TryGetProperty a los nombres exactos.
+    public async Task<List<JobOffer>> FetchInfoJobsJobsAsync(string query, CancellationToken ct)
+    {
+        var list = new List<JobOffer>();
+
+        if (string.IsNullOrWhiteSpace(_config.InfoJobsClientId) || string.IsNullOrWhiteSpace(_config.InfoJobsClientSecret))
+        {
+            _logger.LogWarning("InfoJobs no está configurado (falta InfoJobsClientId/InfoJobsClientSecret en BotConfig); se omite esta fuente.");
+            return list;
+        }
+
+        var url = "https://api.infojobs.net/api/9/offer" +
+                  $"?q={Uri.EscapeDataString(query)}" +
+                  "&maxResults=25" +
+                  "&order=updated-desc";
+
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            var basicAuth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_config.InfoJobsClientId}:{_config.InfoJobsClientSecret}"));
+            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", basicAuth);
+            req.Headers.Accept.ParseAdd("application/json");
+            req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
+
+            var response = await _http.SendAsync(req, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning("InfoJobs respondió {Status} para '{Query}': {Body}", response.StatusCode, query, body);
+                return list;
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("offers", out var offers))
+                return list;
+
+            foreach (var item in offers.EnumerateArray())
+            {
+                var title = item.TryGetProperty("title", out var t) ? CleanHtml(t.GetString() ?? "") : "";
+                if (string.IsNullOrWhiteSpace(title)) continue;
+
+                var company = item.TryGetProperty("author", out var author) && author.TryGetProperty("name", out var authorName)
+                    ? authorName.GetString() ?? "Empresa en InfoJobs"
+                    : "Empresa en InfoJobs";
+
+                var jobUrl = item.TryGetProperty("link", out var l) ? l.GetString() ?? "" : "";
+                if (string.IsNullOrWhiteSpace(jobUrl)) continue;
+
+                var descriptionSnippet = item.TryGetProperty("requirementMin", out var reqMin)
+                    ? CleanHtml(reqMin.GetString() ?? "")
+                    : title;
+
+                var id = item.TryGetProperty("id", out var idProp)
+                    ? "ij_" + idProp.GetString()
+                    : "ij_" + Math.Abs(jobUrl.GetHashCode());
+
+                if (list.All(x => x.Id != id))
+                {
+                    list.Add(new JobOffer(id, title, company, jobUrl, $"{title} en {company}. {descriptionSnippet}", DateTime.UtcNow));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Aviso consultando InfoJobs API para '{Query}'.", query);
+        }
+
+        return list;
+    }
+
+    // --- 6. FEEDS RSS/ATOM GENÉRICOS (BotConfig.Feeds) ---
+    // Permite sumar cualquier feed de empleo (bolsas universitarias, blogs de empresas con
+    // vacantes, agregadores...) sin escribir un parser específico por cada uno. Soporta tanto
+    // RSS 2.0 (<item>) como Atom (<entry>) buscando por LocalName, así que funciona con o sin
+    // namespace por defecto.
+    public async Task<List<JobOffer>> FetchGenericFeedsAsync(CancellationToken ct)
+    {
+        var list = new List<JobOffer>();
+
+        foreach (var feedUrl in _config.Feeds ?? new List<string>())
+        {
+            if (ct.IsCancellationRequested) break;
+            if (string.IsNullOrWhiteSpace(feedUrl)) continue;
+
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, feedUrl);
+                req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
+
+                var response = await _http.SendAsync(req, ct);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Feed '{Url}' respondió {Status}.", feedUrl, response.StatusCode);
+                    continue;
+                }
+
+                var xml = await response.Content.ReadAsStringAsync(ct);
+                var xdoc = XDocument.Parse(xml);
+
+                var items = xdoc.Descendants().Where(e => e.Name.LocalName is "item" or "entry");
+
+                foreach (var item in items)
+                {
+                    var title = CleanHtml(item.Elements().FirstOrDefault(e => e.Name.LocalName == "title")?.Value ?? "");
+                    if (string.IsNullOrWhiteSpace(title)) continue;
+
+                    var linkEl = item.Elements().FirstOrDefault(e => e.Name.LocalName == "link");
+                    // RSS: <link>texto</link>. Atom: <link href="..." /> (a veces varios, cogemos el primero).
+                    var link = linkEl?.Attribute("href")?.Value ?? linkEl?.Value ?? "";
+                    if (string.IsNullOrWhiteSpace(link)) continue;
+
+                    var description = CleanHtml(
+                        item.Elements().FirstOrDefault(e => e.Name.LocalName is "description" or "summary" or "content")?.Value
+                        ?? title);
+
+                    var id = "feed_" + Math.Abs((feedUrl + link).GetHashCode());
+
+                    if (list.All(x => x.Id != id))
+                    {
+                        var sourceHost = Uri.TryCreate(feedUrl, UriKind.Absolute, out var feedUri) ? feedUri.Host : "Feed";
+                        list.Add(new JobOffer(id, title, sourceHost, link, description, DateTime.UtcNow));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Aviso consultando el feed '{Url}'.", feedUrl);
+            }
         }
 
         return list;

@@ -13,6 +13,10 @@ public class Worker : BackgroundService
     private readonly CvCompilerService _cvCompiler;
     private readonly TelegramNotifierService _notifier;
 
+    // Desplazamiento para rotar qué términos de búsqueda recurrente se escanean en LinkedIn
+    // cada ciclo, en vez de escanear siempre los 4 primeros y dejar el resto sin cubrir nunca.
+    private int _linkedInRotationOffset = 0;
+
     public Worker(
         ILogger<Worker> logger,
         BotConfig config,
@@ -37,9 +41,6 @@ public class Worker : BackgroundService
 
         _db.SeedDefaultQueries(_config.SearchQueries);
 
-        // StartReceiving -> StartReceivingAsync: ahora borra un posible webhook residual
-        // antes de arrancar el long polling. No bloquea el resto del Worker: internamente
-        // arranca su propio bucle de recepción en segundo plano.
         await _notifier.StartReceivingAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -58,6 +59,10 @@ public class Worker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Ciclo completo: todas las fuentes configuradas. Es lo que dispara tanto el bucle
+    /// automático como el comando de Telegram /run.
+    /// </summary>
     public async Task RunPipelineAsync(CancellationToken ct)
     {
         var allOffers = new List<JobOffer>();
@@ -76,12 +81,6 @@ public class Worker : BackgroundService
         _logger.LogInformation(">>> [Tecnoempleo] Obtenidas: {Count} ofertas", tecnoTotal);
 
         // 2. Adzuna API
-        // OJO: el tier gratuito de Adzuna es limitado (varía según el plan que te haya
-        // asignado el registro, del orden de unos pocos miles de llamadas/mes). Con 2
-        // queries por ciclo y un CheckIntervalMinutes agresivo (p.ej. cada 60 min = 48
-        // llamadas/día) puedes acercarte al límite mensual. Si empiezas a ver 429 aquí,
-        // sube CheckIntervalMinutes o reduce las queries de Adzuna antes de pedir un plan
-        // de pago.
         var adzunaQueries = new[] { "c# junior", ".net junior" };
         var adzunaTotal = 0;
         foreach (var aq in adzunaQueries)
@@ -100,8 +99,44 @@ public class Worker : BackgroundService
         _logger.LogInformation(">>> [Remotive API] Obtenidas: {Count} ofertas", remoteOffers.Count);
         await Task.Delay(1000, ct);
 
-        // 4. LinkedIn
-        var activeQueries = _db.GetSearchQueries().Take(4).ToList();
+        // 4. InfoJobs API
+        var infoJobsQueries = new[] { "c# junior", ".net junior", "programador .net trainee" };
+        var infoJobsTotal = 0;
+        foreach (var ijq in infoJobsQueries)
+        {
+            if (ct.IsCancellationRequested) break;
+            var ijOffers = await _scraper.FetchInfoJobsJobsAsync(ijq, ct);
+            infoJobsTotal += ijOffers.Count;
+            allOffers.AddRange(ijOffers);
+            await Task.Delay(1000, ct);
+        }
+        _logger.LogInformation(">>> [InfoJobs API] Obtenidas: {Count} ofertas", infoJobsTotal);
+
+        // 5. Feeds RSS/Atom genéricos
+        if (_config.Feeds is { Count: > 0 })
+        {
+            var feedOffers = await _scraper.FetchGenericFeedsAsync(ct);
+            allOffers.AddRange(feedOffers);
+            _logger.LogInformation(">>> [Feeds RSS] Obtenidas: {Count} ofertas", feedOffers.Count);
+        }
+
+        // 6. LinkedIn — rotando el subconjunto de términos activos
+        var allQueries = _db.GetSearchQueries();
+        List<string> activeQueries;
+        if (allQueries.Count <= 4)
+        {
+            activeQueries = allQueries;
+        }
+        else
+        {
+            activeQueries = allQueries.Skip(_linkedInRotationOffset % allQueries.Count).Take(4).ToList();
+            if (activeQueries.Count < 4)
+            {
+                activeQueries.AddRange(allQueries.Take(4 - activeQueries.Count));
+            }
+            _linkedInRotationOffset = (_linkedInRotationOffset + 4) % allQueries.Count;
+        }
+
         var linkedInTotal = 0;
         foreach (var query in activeQueries)
         {
@@ -119,75 +154,126 @@ public class Worker : BackgroundService
         _logger.LogInformation("TOTAL OFERTAS ÚNICAS DESCARGADAS: {Count}", uniqueOffers.Count);
         _logger.LogInformation("================================================");
 
-        // 5. Filtrado, evaluación y compilación
         foreach (var offer in uniqueOffers)
         {
             if (ct.IsCancellationRequested) break;
-
-            if (_db.HasBeenProcessed(offer.Id))
-            {
-                continue;
-            }
-
-            if (!PassesLocalFilter(offer))
-            {
-                _logger.LogInformation("Descartada por filtro local: '{Title}'", offer.Title);
-                _db.MarkAsProcessed(offer.Id, offer.Title, offer.Company, 0);
-                continue;
-            }
-
-            _logger.LogInformation("-> Evaluando con Gemini: '{Title}' en {Company}...", offer.Title, offer.Company);
-            var eval = await _scorer.EvaluateAsync(offer, ct);
-
-            if (eval == null)
-            {
-                // IMPORTANTE: a propósito NO se llama a _db.MarkAsProcessed aquí.
-                // Un fallo de Gemini (404 de modelo, 429/503 transitorio, corte de red...)
-                // no significa que la oferta no encaje: significa que no hemos podido
-                // evaluarla todavía. Si la marcáramos como procesada, quedaría enterrada
-                // para siempre en SQLite aunque el problema de Gemini se resuelva al
-                // minuto siguiente. Al no marcarla, se reintentará en el próximo ciclo
-                // (dentro de {Minutes} min).
-                _logger.LogWarning(
-                    "Gemini no pudo evaluar '{Title}' (respuesta vacía o no disponible); se reintentará en el próximo ciclo.",
-                    offer.Title);
-                continue;
-            }
-
-            _logger.LogInformation("Gemini score: {Score}/100", eval.Score);
-            _db.MarkAsProcessed(offer.Id, offer.Title, offer.Company, eval.Score);
-
-            if (eval.Score >= _config.MinScoreThreshold)
-            {
-                _logger.LogInformation("¡SUPERÓ EL UMBRAL ({Score})! Compilando PDF en Typst...", eval.Score);
-                var pdfPath = await _cvCompiler.GeneratePdfAsync(offer, eval, ct);
-
-                if (string.IsNullOrEmpty(pdfPath))
-                {
-                    _logger.LogError("Fallo al compilar el PDF con Typst. Comprueba si 'typst' está instalado.");
-                }
-
-                _logger.LogInformation("Enviando notificación a Telegram...");
-                await _notifier.SendNotificationAsync(offer, eval, pdfPath, ct);
-                _logger.LogInformation("¡Notificación enviada!");
-            }
-
-            await Task.Delay(5000, ct);
+            await ProcessOfferAsync(offer, ct);
         }
+    }
+
+    /// <summary>
+    /// Escaneo puntual para el comando de Telegram /scan &lt;término&gt;: solo consulta las
+    /// fuentes que aceptan un término de búsqueda (Tecnoempleo, LinkedIn, Adzuna, InfoJobs).
+    /// No se guarda en SearchQueries, así que no pasa a formar parte del rastreo recurrente.
+    /// Remotive y los feeds RSS no aceptan término de búsqueda, así que se omiten aquí
+    /// (ya se cubren en el ciclo completo).
+    /// </summary>
+    public async Task RunAdHocScanAsync(string query, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            _logger.LogWarning("RunAdHocScanAsync llamado sin término de búsqueda; se ignora.");
+            return;
+        }
+
+        _logger.LogInformation("=== Escaneo puntual (/scan) para: '{Query}' ===", query);
+
+        var allOffers = new List<JobOffer>();
+
+        var tecnoOffers = await _scraper.FetchTecnoEmpleoJobsAsync(query, ct);
+        allOffers.AddRange(tecnoOffers);
+        _logger.LogInformation(">>> [Tecnoempleo /scan] '{Query}': {Count} ofertas", query, tecnoOffers.Count);
+        await Task.Delay(1000, ct);
+
+        var liOffers = await _scraper.FetchLinkedInJobsAsync(query, ct);
+        allOffers.AddRange(liOffers);
+        _logger.LogInformation(">>> [LinkedIn /scan] '{Query}': {Count} ofertas", query, liOffers.Count);
+        await Task.Delay(1200, ct);
+
+        var adzOffers = await _scraper.FetchAdzunaJobsAsync(query, ct);
+        allOffers.AddRange(adzOffers);
+        _logger.LogInformation(">>> [Adzuna /scan] '{Query}': {Count} ofertas", query, adzOffers.Count);
+        await Task.Delay(1000, ct);
+
+        var ijOffers = await _scraper.FetchInfoJobsJobsAsync(query, ct);
+        allOffers.AddRange(ijOffers);
+        _logger.LogInformation(">>> [InfoJobs /scan] '{Query}': {Count} ofertas", query, ijOffers.Count);
+
+        var uniqueOffers = allOffers.GroupBy(o => o.Id).Select(g => g.First()).ToList();
+        _logger.LogInformation(">>> [/scan '{Query}'] Total ofertas únicas: {Count}", query, uniqueOffers.Count);
+
+        foreach (var offer in uniqueOffers)
+        {
+            if (ct.IsCancellationRequested) break;
+            await ProcessOfferAsync(offer, ct);
+        }
+
+        _logger.LogInformation("=== Fin del escaneo puntual (/scan) para: '{Query}' ===", query);
+    }
+
+    /// <summary>
+    /// Lógica compartida por RunPipelineAsync y RunAdHocScanAsync: dedup, filtro local,
+    /// evaluación con Gemini, compilación del CV y notificación si supera el umbral.
+    /// </summary>
+    private async Task ProcessOfferAsync(JobOffer offer, CancellationToken ct)
+    {
+        if (_db.HasBeenProcessed(offer.Id))
+        {
+            return;
+        }
+
+        if (!PassesLocalFilter(offer))
+        {
+            _logger.LogInformation("Descartada por filtro local: '{Title}'", offer.Title);
+            _db.MarkAsProcessed(offer.Id, offer.Title, offer.Company, 0);
+            return;
+        }
+
+        _logger.LogInformation("-> Evaluando con Gemini: '{Title}' en {Company}...", offer.Title, offer.Company);
+        var eval = await _scorer.EvaluateAsync(offer, ct);
+
+        if (eval == null)
+        {
+            // A propósito NO se marca como procesada: un fallo de Gemini no significa que la
+            // oferta no encaje, solo que no se ha podido evaluar todavía. Se reintentará en el
+            // próximo ciclo (o la próxima vez que se dispare /run o /scan sobre ella).
+            _logger.LogWarning(
+                "Gemini no pudo evaluar '{Title}' (respuesta vacía o no disponible); se reintentará más adelante.",
+                offer.Title);
+            return;
+        }
+
+        _logger.LogInformation("Gemini score: {Score}/100", eval.Score);
+        _db.MarkAsProcessed(offer.Id, offer.Title, offer.Company, eval.Score);
+
+        if (eval.Score >= _config.MinScoreThreshold)
+        {
+            _logger.LogInformation("¡SUPERÓ EL UMBRAL ({Score})! Compilando PDF en Typst...", eval.Score);
+            var pdfPath = await _cvCompiler.GeneratePdfAsync(offer, eval, ct);
+
+            if (string.IsNullOrEmpty(pdfPath))
+            {
+                _logger.LogError("Fallo al compilar el PDF con Typst. Comprueba si 'typst' está instalado.");
+            }
+
+            _logger.LogInformation("Enviando notificación a Telegram...");
+            await _notifier.SendNotificationAsync(offer, eval, pdfPath, ct);
+            _logger.LogInformation("¡Notificación enviada!");
+        }
+
+        await Task.Delay(5000, ct);
     }
 
     private bool PassesLocalFilter(JobOffer offer)
     {
         var text = $"{offer.Title} {offer.Description}".ToLowerInvariant();
 
-        // Si se han configurado palabras obligatorias, debe cumplir al menos una
         if (_config.RequiredKeywords != null && _config.RequiredKeywords.Any())
         {
             var matchesTech = _config.RequiredKeywords.Any(kw => text.Contains(kw.ToLowerInvariant()));
             if (!matchesTech) return false;
         }
 
-        // Si contiene alguna de las palabras excluidas en el título, se descarta
         var titleLower = offer.Title.ToLowerInvariant();
         if (_config.ExcludedKeywords != null && _config.ExcludedKeywords.Any())
         {

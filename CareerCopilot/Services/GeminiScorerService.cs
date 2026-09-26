@@ -16,11 +16,25 @@ public class GeminiScorerService
         PropertyNameCaseInsensitive = true
     };
 
+    // Modelos vigentes confirmados directamente por el error 404 de Google del 26-sep-2026
+    // ("...update your code to use models/gemini-3.8-flash...") y por la documentación
+    // oficial (ai.google.dev/gemini-api/docs/interactions-overview). gemini-2.5-flash se ha
+    // quitado por completo: Google confirma que restringe su acceso a cuentas que ya lo usaban
+    // antes, así que para una cuenta nueva simplemente no sirve como fallback.
+    //
+    // AVISO RECURRENTE: este es el tercer incidente por el mismo motivo. El catálogo de
+    // Gemini cambia con mucha frecuencia (nuevas "Flash" casi cada mes, retiros sin apenas
+    // aviso). Si vuelves a ver 404 en TODOS los modelos, verifica primero en
+    // https://ai.google.dev/gemini-api/docs/models antes de tocar nada más — y evita
+    // sobrescribir este array con versiones antiguas guardadas en otro sitio (parece ser
+    // la causa real de las dos regresiones anteriores).
     private static readonly string[] ActiveModels =
     {
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash"
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite"
     };
 
     public GeminiScorerService(HttpClient http, BotConfig config, ILogger<GeminiScorerService> logger)
@@ -111,8 +125,9 @@ REGLAS DE REDACCIÓN:
 4. 'match': true si score >= {{_config.MinScoreThreshold}}, false en caso contrario.
 5. 'strengths': Exactamente 3 puntos fuertes técnicos reales alineados con la oferta.
 6. 'concerns': 1 o 2 requisitos que pida la oferta y el candidato no posea o deba reforzar.
-7. 'tailoredSummary': Resumen profesional escrito en PRIMERA PERSONA ("Soy...", "Aporto..."), fluido, sólido y continuo de 4 a 6 líneas (ENTRE 500 Y 700 CARACTERES). Debe exponer tu base en C#, ASP.NET Core, microservicios, bases de datos relacionales y cómo encajas con la vacante. No uses corchetes '[' ni ']'.
-8. 'tailoredExperience': EXACTAMENTE 4 viñetas técnicas redactadas en primera persona ("Diseñé...", "Implementé...", "Configuré...") de ENTRE 150 Y 210 CARACTERES cada una, adaptadas de las responsabilidades reales en EPAM Neoris. No uses corchetes '[' ni ']'.
+7. 'tailoredSummary': Resumen profesional escrito en PRIMERA PERSONA ("Soy...", "Aporto..."), fluido, sólido y continuo de 4 a 6 líneas. APROVECHA EL ESPACIO: acércate al máximo del rango, entre 620 Y 700 CARACTERES (no te quedes corto en 500 salvo que el perfil base no dé para más); el objetivo es llenar la página de una sola cara sin dejar huecos en blanco. Debe exponer tu base en C#, ASP.NET Core, microservicios, bases de datos relacionales y cómo encajas con la vacante. No uses corchetes '[' ni ']'.
+8. 'tailoredExperience': EXACTAMENTE 4 viñetas técnicas redactadas en primera persona ("Diseñé...", "Implementé...", "Configuré...") de ENTRE 190 Y 210 CARACTERES cada una (acércate al máximo, no al mínimo), adaptadas de las responsabilidades reales en EPAM Neoris. No uses corchetes '[' ni ']'.
+9. Si el PERFIL BASE no tiene suficiente detalle real para llegar a esas longitudes sin inventar nada, prioriza SIEMPRE la regla anti-alucinación sobre el objetivo de longitud: es preferible un texto más corto y honesto que uno largo y falso.
 """;
 
         return new
