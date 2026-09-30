@@ -58,9 +58,22 @@ public class JobScraperService
                 var idMatch = Regex.Match(offerUrl, @"rf-([a-z0-9\-]+)", RegexOptions.IgnoreCase);
                 var id = idMatch.Success ? "te_" + idMatch.Groups[1].Value : "te_" + Math.Abs(offerUrl.GetHashCode()).ToString();
 
+                var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                               title.Contains("teletrabajo", StringComparison.OrdinalIgnoreCase);
+
                 if (list.All(x => x.Id != id))
                 {
-                    list.Add(new JobOffer(id, title, "Empresa Tecnoempleo", offerUrl, $"{title} en Tecnoempleo", DateTime.UtcNow));
+                    list.Add(new JobOffer(
+                        id,
+                        title,
+                        "Empresa Tecnoempleo",
+                        offerUrl,
+                        $"{title} en Tecnoempleo",
+                        DateTime.UtcNow,
+                        Province: string.Empty,
+                        City: string.Empty,
+                        IsRemote: isRemote
+                    ));
                 }
             }
         }
@@ -105,17 +118,34 @@ public class JobScraperService
                 if (!linkMatch.Success)
                     linkMatch = Regex.Match(snippet, @"href=""([^""]*linkedin\.com/jobs/view/[^""]*)""", RegexOptions.IgnoreCase);
 
+                var locationMatch = Regex.Match(snippet, @"job-search-card__location[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
+
                 if (titleMatch.Success && linkMatch.Success)
                 {
                     var title = titleMatch.Groups[1].Value.Trim();
                     var company = companyMatch.Success ? companyMatch.Groups[1].Value.Trim() : "Empresa en LinkedIn";
                     var rawLink = linkMatch.Groups[1].Value.Trim();
+                    var location = locationMatch.Success ? locationMatch.Groups[1].Value.Trim() : string.Empty;
 
                     var idMatch = Regex.Match(rawLink, @"(\d{8,})");
                     var id = idMatch.Success ? idMatch.Value : Math.Abs(rawLink.GetHashCode()).ToString();
                     var finalUrl = $"https://es.linkedin.com/jobs/view/{id}";
 
-                    list.Add(new JobOffer("li_" + id, title, company, finalUrl, $"{title} en {company}", DateTime.UtcNow));
+                    var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                                   location.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                                   location.Contains("remote", StringComparison.OrdinalIgnoreCase);
+
+                    list.Add(new JobOffer(
+                        "li_" + id,
+                        title,
+                        company,
+                        finalUrl,
+                        $"{title} en {company} ({location})",
+                        DateTime.UtcNow,
+                        Province: location,
+                        City: location,
+                        IsRemote: isRemote
+                    ));
                 }
             }
         }
@@ -161,7 +191,17 @@ public class JobScraperService
                          candidateLocations.Contains("Europe", StringComparison.OrdinalIgnoreCase)))
                     {
                         var id = "rem_" + item.GetProperty("id").GetInt64();
-                        list.Add(new JobOffer(id, title, company, jobUrl, $"{title} en {company} ({candidateLocations})", DateTime.UtcNow));
+                        list.Add(new JobOffer(
+                            id,
+                            title,
+                            company,
+                            jobUrl,
+                            $"{title} en {company} ({candidateLocations})",
+                            DateTime.UtcNow,
+                            Province: string.Empty,
+                            City: candidateLocations,
+                            IsRemote: true
+                        ));
                     }
                 }
             }
@@ -175,9 +215,6 @@ public class JobScraperService
     }
 
     // --- 4. ADZUNA API (Sustituto legal y estable de Indeed España) ---
-    // Requiere registro gratuito en https://developer.adzuna.com/ (App ID + App Key).
-    // Cubre España vía el segmento /es/ y en la práctica agrega muchas ofertas
-    // que también aparecen en Indeed, sin WAF ni fingerprinting TLS que esquivar.
     public async Task<List<JobOffer>> FetchAdzunaJobsAsync(string query, CancellationToken ct)
     {
         var list = new List<JobOffer>();
@@ -207,8 +244,6 @@ public class JobScraperService
                 return list;
             }
 
-            // Leemos como array de bytes para evitar que el charset no estándar de Adzuna
-            // ('charset=utf8' sin guion) dispare una InvalidOperationException en ReadAsStringAsync.
             var bytes = await response.Content.ReadAsByteArrayAsync(ct);
             var json = Encoding.UTF8.GetString(bytes);
 
@@ -237,13 +272,26 @@ public class JobScraperService
                     ? "adz_" + idProp.GetString()
                     : "adz_" + Math.Abs(jobUrl.GetHashCode());
 
+                var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                               location.Contains("remoto", StringComparison.OrdinalIgnoreCase);
+
                 if (list.All(x => x.Id != id))
                 {
                     var summary = string.IsNullOrWhiteSpace(location)
                         ? $"{title} en {company}"
                         : $"{title} en {company} ({location})";
 
-                    list.Add(new JobOffer(id, title, company, jobUrl, summary, DateTime.UtcNow));
+                    list.Add(new JobOffer(
+                        id,
+                        title,
+                        company,
+                        jobUrl,
+                        summary,
+                        DateTime.UtcNow,
+                        Province: location,
+                        City: location,
+                        IsRemote: isRemote
+                    ));
                 }
             }
         }
@@ -255,16 +303,7 @@ public class JobScraperService
         return list;
     }
 
-    // --- 5. INFOJOBS API (portal líder en España; usa InfoJobsClientId/ClientSecret de BotConfig) ---
-    // Regístrate en https://developer.infojobs.net/ para obtener credenciales gratuitas.
-    // Autenticación: HTTP Basic con "ClientId:ClientSecret" en base64 — la búsqueda pública de
-    // ofertas no requiere el intercambio OAuth2 completo.
-    //
-    // OJO: los nombres de campo del JSON ('offers', 'author.name', 'link', 'requirementMin')
-    // están tomados de la documentación pública y de clientes de terceros, no de una llamada
-    // real verificada por mí. Si ves que devuelve 0 resultados con credenciales correctas,
-    // sube el nivel de log a Debug y loguea 'json' una vez para confirmar el esquema real de
-    // tu respuesta, y ajustamos los TryGetProperty a los nombres exactos.
+    // --- 5. INFOJOBS API ---
     public async Task<List<JobOffer>> FetchInfoJobsJobsAsync(string query, CancellationToken ct)
     {
         var list = new List<JobOffer>();
@@ -318,13 +357,37 @@ public class JobScraperService
                     ? CleanHtml(reqMin.GetString() ?? "")
                     : title;
 
+                var province = item.TryGetProperty("province", out var prov) && prov.TryGetProperty("value", out var provVal)
+                    ? provVal.GetString() ?? ""
+                    : "";
+
+                var city = item.TryGetProperty("city", out var cProp) ? cProp.GetString() ?? "" : "";
+
+                var teleworking = item.TryGetProperty("teleworking", out var tw) && tw.TryGetProperty("value", out var twVal)
+                    ? twVal.GetString() ?? ""
+                    : "";
+
+                var isRemote = teleworking.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                               teleworking.Contains("teletrabajo", StringComparison.OrdinalIgnoreCase) ||
+                               title.Contains("remoto", StringComparison.OrdinalIgnoreCase);
+
                 var id = item.TryGetProperty("id", out var idProp)
                     ? "ij_" + idProp.GetString()
                     : "ij_" + Math.Abs(jobUrl.GetHashCode());
 
                 if (list.All(x => x.Id != id))
                 {
-                    list.Add(new JobOffer(id, title, company, jobUrl, $"{title} en {company}. {descriptionSnippet}", DateTime.UtcNow));
+                    list.Add(new JobOffer(
+                        id,
+                        title,
+                        company,
+                        jobUrl,
+                        $"{title} en {company}. {descriptionSnippet}",
+                        DateTime.UtcNow,
+                        Province: province,
+                        City: city,
+                        IsRemote: isRemote
+                    ));
                 }
             }
         }
@@ -336,11 +399,7 @@ public class JobScraperService
         return list;
     }
 
-    // --- 6. FEEDS RSS/ATOM GENÉRICOS (BotConfig.Feeds) ---
-    // Permite sumar cualquier feed de empleo (bolsas universitarias, blogs de empresas con
-    // vacantes, agregadores...) sin escribir un parser específico por cada uno. Soporta tanto
-    // RSS 2.0 (<item>) como Atom (<entry>) buscando por LocalName, así que funciona con o sin
-    // namespace por defecto.
+    // --- 6. FEEDS RSS/ATOM GENÉRICOS ---
     public async Task<List<JobOffer>> FetchGenericFeedsAsync(CancellationToken ct)
     {
         var list = new List<JobOffer>();
@@ -373,7 +432,6 @@ public class JobScraperService
                     if (string.IsNullOrWhiteSpace(title)) continue;
 
                     var linkEl = item.Elements().FirstOrDefault(e => e.Name.LocalName == "link");
-                    // RSS: <link>texto</link>. Atom: <link href="..." /> (a veces varios, cogemos el primero).
                     var link = linkEl?.Attribute("href")?.Value ?? linkEl?.Value ?? "";
                     if (string.IsNullOrWhiteSpace(link)) continue;
 
@@ -383,10 +441,23 @@ public class JobScraperService
 
                     var id = "feed_" + Math.Abs((feedUrl + link).GetHashCode());
 
+                    var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                                   description.Contains("remoto", StringComparison.OrdinalIgnoreCase);
+
                     if (list.All(x => x.Id != id))
                     {
                         var sourceHost = Uri.TryCreate(feedUrl, UriKind.Absolute, out var feedUri) ? feedUri.Host : "Feed";
-                        list.Add(new JobOffer(id, title, sourceHost, link, description, DateTime.UtcNow));
+                        list.Add(new JobOffer(
+                            id,
+                            title,
+                            sourceHost,
+                            link,
+                            description,
+                            DateTime.UtcNow,
+                            Province: string.Empty,
+                            City: string.Empty,
+                            IsRemote: isRemote
+                        ));
                     }
                 }
             }

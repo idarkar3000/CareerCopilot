@@ -38,9 +38,7 @@ builder.Services.AddSingleton<TelegramNotifierService>(sp =>
     {
         var worker = sp.GetRequiredService<Worker>();
 
-        // Un escaneo (completo o puntual) puede tardar varios minutos por el throttling
-        // entre peticiones a fuentes externas y a Gemini. Le damos un margen generoso y lo
-        // atamos también al apagado de la app, para no dejar tareas huérfanas si se reinicia.
+        // Un escaneo (completo o puntual) puede tardar varios minutos por el throttling entre peticiones a fuentes externas, se le da un poco de margen
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             timeoutCts.Token, appLifetime.ApplicationStopping);

@@ -16,18 +16,9 @@ public class GeminiScorerService
         PropertyNameCaseInsensitive = true
     };
 
-    // Modelos vigentes confirmados directamente por el error 404 de Google del 26-sep-2026
-    // ("...update your code to use models/gemini-3.8-flash...") y por la documentación
-    // oficial (ai.google.dev/gemini-api/docs/interactions-overview). gemini-2.5-flash se ha
-    // quitado por completo: Google confirma que restringe su acceso a cuentas que ya lo usaban
-    // antes, así que para una cuenta nueva simplemente no sirve como fallback.
-    //
-    // AVISO RECURRENTE: este es el tercer incidente por el mismo motivo. El catálogo de
-    // Gemini cambia con mucha frecuencia (nuevas "Flash" casi cada mes, retiros sin apenas
-    // aviso). Si vuelves a ver 404 en TODOS los modelos, verifica primero en
-    // https://ai.google.dev/gemini-api/docs/models antes de tocar nada más — y evita
-    // sobrescribir este array con versiones antiguas guardadas en otro sitio (parece ser
-    // la causa real de las dos regresiones anteriores).
+
+    // Si hay error de que hay modelos que no están activos, consultar en: https://ai.google.dev/gemini-api/docs/models
+
     private static readonly string[] ActiveModels =
     {
         "gemini-3.8-flash",
@@ -100,35 +91,35 @@ public class GeminiScorerService
     private object BuildRequestPayload(JobOffer job)
     {
         var prompt = $$"""
-Actúa como un selector técnico senior y preparador de CVs técnicos en .NET y C#.
-Evalúa la compatibilidad del candidato con la oferta y redacta las secciones adaptadas del currículum.
+            Actúa como un selector técnico senior y preparador de CVs técnicos en .NET y C#.
+            Evalúa la compatibilidad del candidato con la oferta y redacta las secciones adaptadas del currículum.
 
-PERFIL BASE DEL CANDIDATO (ÚNICA FUENTE DE VERDAD):
-{{_config.CandidateProfile}}
+            PERFIL BASE DEL CANDIDATO (ÚNICA FUENTE DE VERDAD):
+            {{_config.CandidateProfile}}
 
-OFERTA DE TRABAJO:
-Puesto: {{job.Title}}
-Empresa: {{job.Company}}
-Descripción / Requisitos:
-{{job.Description}}
+            OFERTA DE TRABAJO:
+            Puesto: {{job.Title}}
+            Empresa: {{job.Company}}
+            Descripción / Requisitos:
+            {{job.Description}}
 
-REGLAS DE ORO CONTRA ALUCINACIONES:
-1. Todo lo que redactes en 'tailoredSummary' y 'tailoredExperience' debe basarse ESTRICTAMENTE en datos presentes en el PERFIL BASE.
-2. PROHIBIDO inventar cifras cuantitativas de rendimiento (ej: 'reducción de 60s a 10s', porcentajes ficticios) o tecnologías que no domine.
-3. REGLA DE AISLAMIENTO: Las viñetas de 'tailoredExperience' pertenecen EXCLUSIVAMENTE a las responsabilidades en EPAM Neoris (Backend, Microservicios, CQRS, Minimal APIs, SQL Server con Dapper, Mapster, Angular, xUnit). NUNCA traslades tareas de proyectos personales como Pdf_Signer (WPF, firmas manuscritas, visores PDF) o RadarChollos a la experiencia laboral de EPAM Neoris.
-4. Si la vacante exige herramientas no presentes en el perfil (ej. Java, PHP, AWS avanzado, React), refléjalas honestamente en 'concerns'.
+            REGLAS DE ORO CONTRA ALUCINACIONES:
+            1. Todo lo que redactes en 'tailoredSummary' y 'tailoredExperience' debe basarse ESTRICTAMENTE en datos presentes en el PERFIL BASE.
+            2. PROHIBIDO inventar cifras cuantitativas de rendimiento (ej: 'reducción de 60s a 10s', porcentajes ficticios) o tecnologías que no domine.
+            3. REGLA DE AISLAMIENTO: Las viñetas de 'tailoredExperience' pertenecen EXCLUSIVAMENTE a las responsabilidades en EPAM Neoris (Backend, Microservicios, CQRS, Minimal APIs, SQL Server con Dapper, Mapster, Angular, xUnit). NUNCA traslades tareas de proyectos personales como Pdf_Signer (WPF, firmas manuscritas, visores PDF) o RadarChollos a la experiencia laboral de EPAM Neoris.
+            4. Si la vacante exige herramientas no presentes en el perfil (ej. Java, PHP, AWS avanzado, React), refléjalas honestamente en 'concerns'.
 
-REGLAS DE REDACCIÓN:
-1. VOZ Y TONO ESTRICTOS: Tanto 'tailoredSummary' como 'tailoredExperience' DEBEN ESTAR ESCRITOS EN PRIMERA PERSONA DEL SINGULAR ("Soy desarrollador backend...", "Cuento con experiencia en...", "Implementé...", "Diseñé..."). NUNCA hables en tercera persona ("Ingeniero de software que aporta...", "El candidato cuenta con...").
-2. NIVEL PROFESIONAL: El candidato es un Desarrollador Backend JUNIOR con prácticas finalizadas. Emplea verbos directos de ejecución técnica ("Desarrollé", "Configuré", "Implementé", "Optimicé").
-3. 'score': Entero de 0 a 100 evaluando afinidad técnica real.
-4. 'match': true si score >= {{_config.MinScoreThreshold}}, false en caso contrario.
-5. 'strengths': Exactamente 3 puntos fuertes técnicos reales alineados con la oferta.
-6. 'concerns': 1 o 2 requisitos que pida la oferta y el candidato no posea o deba reforzar.
-7. 'tailoredSummary': Resumen profesional escrito en PRIMERA PERSONA ("Soy...", "Aporto..."), fluido, sólido y continuo de 4 a 6 líneas. APROVECHA EL ESPACIO: acércate al máximo del rango, entre 620 Y 700 CARACTERES (no te quedes corto en 500 salvo que el perfil base no dé para más); el objetivo es llenar la página de una sola cara sin dejar huecos en blanco. Debe exponer tu base en C#, ASP.NET Core, microservicios, bases de datos relacionales y cómo encajas con la vacante. No uses corchetes '[' ni ']'.
-8. 'tailoredExperience': EXACTAMENTE 4 viñetas técnicas redactadas en primera persona ("Diseñé...", "Implementé...", "Configuré...") de ENTRE 190 Y 210 CARACTERES cada una (acércate al máximo, no al mínimo), adaptadas de las responsabilidades reales en EPAM Neoris. No uses corchetes '[' ni ']'.
-9. Si el PERFIL BASE no tiene suficiente detalle real para llegar a esas longitudes sin inventar nada, prioriza SIEMPRE la regla anti-alucinación sobre el objetivo de longitud: es preferible un texto más corto y honesto que uno largo y falso.
-""";
+            REGLAS DE REDACCIÓN:
+            1. VOZ Y TONO ESTRICTOS: Tanto 'tailoredSummary' como 'tailoredExperience' DEBEN ESTAR ESCRITOS EN PRIMERA PERSONA DEL SINGULAR ("Soy desarrollador backend...", "Cuento con experiencia en...", "Implementé...", "Diseñé..."). NUNCA hables en tercera persona ("Ingeniero de software que aporta...", "El candidato cuenta con...").
+            2. NIVEL PROFESIONAL: El candidato es un Desarrollador Backend JUNIOR con prácticas finalizadas. Emplea verbos directos de ejecución técnica ("Desarrollé", "Configuré", "Implementé", "Optimicé").
+            3. 'score': Entero de 0 a 100 evaluando afinidad técnica real.
+            4. 'match': true si score >= {{_config.MinScoreThreshold}}, false en caso contrario.
+            5. 'strengths': Exactamente 3 puntos fuertes técnicos reales alineados con la oferta.
+            6. 'concerns': 1 o 2 requisitos que pida la oferta y el candidato no posea o deba reforzar.
+            7. 'tailoredSummary': Resumen profesional escrito en PRIMERA PERSONA ("Soy...", "Aporto..."), fluido, sólido y continuo de 4 a 6 líneas. APROVECHA EL ESPACIO: acércate al máximo del rango, entre 620 Y 700 CARACTERES (no te quedes corto en 500 salvo que el perfil base no dé para más); el objetivo es llenar la página de una sola cara sin dejar huecos en blanco. Debe exponer tu base en C#, ASP.NET Core, microservicios, bases de datos relacionales y cómo encajas con la vacante. No uses corchetes '[' ni ']'.
+            8. 'tailoredExperience': EXACTAMENTE 4 viñetas técnicas redactadas en primera persona ("Diseñé...", "Implementé...", "Configuré...") de ENTRE 190 Y 210 CARACTERES cada una (acércate al máximo, no al mínimo), adaptadas de las responsabilidades reales en EPAM Neoris. No uses corchetes '[' ni ']'.
+            9. Si el PERFIL BASE no tiene suficiente detalle real para llegar a esas longitudes sin inventar nada, prioriza SIEMPRE la regla anti-alucinación sobre el objetivo de longitud: es preferible un texto más corto y honesto que uno largo y falso.
+            """;
 
         return new
         {

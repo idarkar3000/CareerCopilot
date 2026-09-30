@@ -14,7 +14,6 @@ public class Worker : BackgroundService
     private readonly TelegramNotifierService _notifier;
 
     // Desplazamiento para rotar qué términos de búsqueda recurrente se escanean en LinkedIn
-    // cada ciclo, en vez de escanear siempre los 4 primeros y dejar el resto sin cubrir nunca.
     private int _linkedInRotationOffset = 0;
 
     public Worker(
@@ -60,8 +59,7 @@ public class Worker : BackgroundService
     }
 
     /// <summary>
-    /// Ciclo completo: todas las fuentes configuradas. Es lo que dispara tanto el bucle
-    /// automático como el comando de Telegram /run.
+    /// Ciclo completo: todas las fuentes configuradas.
     /// </summary>
     public async Task RunPipelineAsync(CancellationToken ct)
     {
@@ -281,6 +279,44 @@ public class Worker : BackgroundService
             if (isExcluded) return false;
         }
 
+        // --- (Remoto España/Global O Presencial/Híbrido Madrid) ---
+        var isRemote = offer.IsRemote
+            || text.Contains("remoto")
+            || text.Contains("teletrabajo")
+            || text.Contains("remote");
+
+        var isMadrid = offer.Province.Contains("madrid", StringComparison.OrdinalIgnoreCase)
+            || offer.City.Contains("madrid", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("madrid");
+
+        if (!isRemote && !isMadrid)
+        {
+            return false;
+        }
+
         return true;
+    }
+
+    private static bool PassesLocationFilter(JobOffer offer, string combinedText)
+    {
+        // A. ¿Es remoto? 
+        var isRemote = offer.IsRemote
+            || combinedText.Contains("remoto")
+            || combinedText.Contains("teletrabajo")
+            || combinedText.Contains("remote")
+            || combinedText.Contains("100% remoto")
+            || combinedText.Contains("full remote");
+
+        if (isRemote)
+        {
+            return true;
+        }
+
+        // B. Si no es remoto, debe ser en Madrid (provincia, ciudad o mención en texto)
+        var isMadrid = offer.Province.Contains("Madrid", StringComparison.OrdinalIgnoreCase)
+            || offer.City.Contains("Madrid", StringComparison.OrdinalIgnoreCase)
+            || combinedText.Contains("madrid");
+
+        return isMadrid;
     }
 }

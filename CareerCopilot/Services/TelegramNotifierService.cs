@@ -21,8 +21,6 @@ public class TelegramNotifierService
     private bool _isReceiving = false;
     private readonly object _lock = new();
 
-    // Estado para distinguir un 409 Conflict transitorio (solape de deploy) de uno persistente
-    // (otra instancia real corriendo con el mismo token).
     private int _consecutiveConflicts;
     private DateTime? _firstConflictAt;
     private static readonly TimeSpan ConflictEscalationWindow = TimeSpan.FromSeconds(90);
@@ -64,10 +62,6 @@ public class TelegramNotifierService
 
         try
         {
-            // Defensivo: si quedó un webhook configurado de una prueba anterior (setWebhook),
-            // compite con el long polling y provoca conflictos espurios en getUpdates.
-            // dropPendingUpdates evita procesar de golpe mensajes acumulados mientras el bot
-            // estuvo caído (por ejemplo, durante un redeploy).
             await _botClient.DeleteWebhookAsync(dropPendingUpdates: true, cancellationToken: ct);
         }
         catch (Exception ex)
@@ -103,7 +97,7 @@ public class TelegramNotifierService
         switch (command)
         {
             case "/test":
-                await bot.SendTextMessageAsync(message.Chat.Id, "🧪 Probando Gemini API + Typst + PDF...", cancellationToken: ct);
+                await bot.SendTextMessageAsync(message.Chat.Id, "🧪 Iniciando prueba: Gemini API + Typst + PDF...", cancellationToken: ct);
 
                 var mockJob = new JobOffer(
                     "mock_" + Guid.NewGuid().ToString("N")[..6],
@@ -111,18 +105,31 @@ public class TelegramNotifierService
                     "Empresa de Prueba Tech",
                     "https://es.linkedin.com/jobs/view/4155609388",
                     "Buscamos desarrollador Junior .NET C# con conocimientos en ASP.NET Core, Entity Framework y SQL Server en Madrid.",
-                    DateTime.UtcNow
+                    DateTime.UtcNow,
+                    "Madrid",
+                    "Madrid",
+                    false
                 );
 
                 var eval = await _scorer.EvaluateAsync(mockJob, ct);
                 if (eval == null)
                 {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "❌ Error: Gemini devolvió nulo. Revisa la API Key o logs.", cancellationToken: ct);
+                    await bot.SendTextMessageAsync(message.Chat.Id, "❌ Error en el test: Gemini devolvió nulo. Revisa la API Key, cuota o logs.", cancellationToken: ct);
                     return;
                 }
 
                 var pdf = await _cvCompiler.GeneratePdfAsync(mockJob, eval, ct);
+                if (string.IsNullOrEmpty(pdf) || !System.IO.File.Exists(pdf))
+                {
+                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Gemini evaluó correctamente, pero falló la compilación del PDF en Typst. Revisa que Typst esté instalado y la plantilla .typ.", cancellationToken: ct);
+                    return;
+                }
+
+                // Enviar la tarjeta de la oferta y el documento adjunto
                 await SendNotificationAsync(mockJob, eval, pdf, ct);
+
+                // Mensaje explícito de éxito
+                await bot.SendTextMessageAsync(message.Chat.Id, "✅ ¡Test completado con éxito! Todo el pipeline (Gemini + Typst + Telegram) funciona correctamente.", cancellationToken: ct);
                 break;
 
             case "/run":
@@ -353,21 +360,53 @@ public class TelegramNotifierService
 
     public async Task SendNotificationAsync(JobOffer job, EvaluationResult eval, string? pdfPath, CancellationToken ct)
     {
-        var message = $@"🎯 *NUEVA OFERTA COMPATIBLE* ({eval.Score}/100)
+        string locationText;
+        if (job.IsRemote)
+        {
+            locationText = "🏠 100% Remoto";
+        }
+        else if (!string.IsNullOrWhiteSpace(job.City) && !string.IsNullOrWhiteSpace(job.Province) && job.City != job.Province)
+        {
+            locationText = $"📍 {job.City}, {job.Province}";
+        }
+        else if (!string.IsNullOrWhiteSpace(job.Province))
+        {
+            locationText = $"📍 {job.Province}";
+        }
+        else if (!string.IsNullOrWhiteSpace(job.City))
+        {
+            locationText = $"📍 {job.City}";
+        }
+        else
+        {
+            locationText = "📍 No especificada";
+        }
+
+        var strengthsText = eval.Strengths != null && eval.Strengths.Any()
+            ? string.Join("\n", eval.Strengths.Select(s => $"• {EscapeMarkdown(s)}"))
+            : "• _No especificados_";
+
+        var concernsText = eval.Concerns != null && eval.Concerns.Any()
+            ? string.Join("\n", eval.Concerns.Select(c => $"• {EscapeMarkdown(c)}"))
+            : "• _Ninguno_";
+
+// El mensaje tiene que estar pegado al margen izquierdo porque si no aparece un tab
+        var message =
+$@"🎯 *NUEVA OFERTA COMPATIBLE* ({eval.Score}/100)
 
 🏢 *Empresa:* {EscapeMarkdown(job.Company)}
 💼 *Puesto:* {EscapeMarkdown(job.Title)}
+📌 *Ubicación:* {EscapeMarkdown(locationText)}
 
 ✅ *Puntos Fuertes:*
-{string.Join("\n", eval.Strengths.Select(s => $"• {EscapeMarkdown(s)}"))}
+{strengthsText}
 
 ⚠️ *A revisar:*
-{string.Join("\n", eval.Concerns.Select(c => $"• {EscapeMarkdown(c)}"))}
-";
+{concernsText}";
 
         var inlineKeyboard = new InlineKeyboardMarkup(new[]
         {
-            InlineKeyboardButton.WithUrl("🌐 Abrir Vacante para Postular", job.Link)
+            InlineKeyboardButton.WithUrl("🌐 Abrir oferta", job.Link)
         });
 
         try

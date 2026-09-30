@@ -6,5 +6,8 @@ public record JobOffer(
     string Company,
     string Link,
     string Description,
-    DateTime PublishedDate
+    DateTime PublishedDate,
+    string Province,
+    string City,
+    bool IsRemote
 );
