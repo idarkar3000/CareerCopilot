@@ -41,6 +41,26 @@ public class CvCompilerService
         (7.8m, 2, 3, 4)
     };
 
+    /// <summary>
+    /// Concepto de cada sección y orden en que se maquetan. La clave es lo que se busca dentro del
+    /// título normalizado, así que "EXPERIENCIA LABORAL (EPAM)" y "Experiencia Profesional" caen
+    /// en la misma entrada. También fija la cabecera canónica que se imprime.
+    /// </summary>
+    private static readonly (string Needle, int Rank, string Heading)[] SectionOrder =
+    {
+        ("experienc", 0, "Experiencia Laboral"),
+        ("proyect", 1, "Proyectos"),
+        ("habilidad", 2, "Habilidades Técnicas"),
+        ("tecnolog", 2, "Tecnologías"),
+        ("conoc", 2, "Conocimientos"),
+        ("formaci", 3, "Formación Académica"),
+        ("estudi", 3, "Formación Académica"),
+        ("titul", 3, "Formación Académica"),
+        ("certific", 3, "Certificaciones"),
+        ("idioma", 4, "Idiomas"),
+        ("lengua", 4, "Idiomas")
+    };
+
     public CvCompilerService(
         ILogger<CvCompilerService> logger,
         BotConfig config,
@@ -62,8 +82,10 @@ public class CvCompilerService
         var outputDir = ResolveOutputDir();
         Directory.CreateDirectory(outputDir);
 
-        ApplyAnchors(eval.Cv, job);
+        // Fusionar antes de aplicar las anclas: si no, la experiencia que llega del perfil se
+        // pegaría a la primera de las secciones repetidas y el resto se quedaría sin imprimir.
         CoalesceSections(eval.Cv);
+        ApplyAnchors(eval.Cv, job);
         OrderSections(eval.Cv);
 
         var candidate = _config.Candidate;
@@ -136,20 +158,30 @@ public class CvCompilerService
     private string BuildFileName(JobOffer job, CandidateConfig candidate)
     {
         var template = string.IsNullOrWhiteSpace(candidate.PdfFileNameTemplate)
-            ? "CV_{job}_{name}"
+            ? "{job}_{name}"
             : candidate.PdfFileNameTemplate;
 
         var namePart = SanitizeFileName(candidate.FullName, 40);
-        var jobPart = SanitizeFileName(job.Title, 25);
+        var jobPart = SanitizeFileName(job.Title, 45);
 
-        // Sin nombre o sin puesto la plantilla no sirve y se cae a un nombre único. Ojo: el
-        // identificador son 35 caracteres, así que aquí no se puede recortar a 40.
-        if (string.IsNullOrWhiteSpace(jobPart) || string.IsNullOrWhiteSpace(namePart))
+        // Sin puesto no hay nada que nombrar: un identificador único evita que dos archivos
+        // distintos acaben con el mismo nombre. Ojo, el identificador son 35 caracteres, así que
+        // aquí no se puede recortar a 40.
+        if (string.IsNullOrWhiteSpace(jobPart))
         {
             _logger.LogWarning(
-                "Falta BotConfig:Candidate:FullName o el título de la oferta está vacío; el PDF se nombra con un identificador único.");
+                "El título de la oferta está vacío; el PDF se nombra con un identificador único.");
 
             return $"CV_{Guid.NewGuid():N}";
+        }
+
+        // Sin nombre el fichero queda con el puesto y un aviso. Es determinista a propósito: dos
+        // ofertas del mismo puesto se sobrescriben, pero nunca se acumulan CV sin identificar.
+        if (string.IsNullOrWhiteSpace(namePart))
+        {
+            _logger.LogWarning(
+                "Falta BotConfig__Candidate__FullName; el PDF '{File}' se nombra solo con el puesto. Configura la variable en Render para incluir el nombre.",
+                $"{jobPart}.pdf");
         }
 
         return SanitizeFileName(template.Replace("{job}", jobPart).Replace("{name}", namePart), 90);
@@ -245,24 +277,29 @@ public class CvCompilerService
 
     /// <summary>
     /// El modelo a veces devuelve la misma sección repetida ("Experiencia Laboral" cuatro veces)
-    /// dejando las últimas sin contenido. Se queda con la primera y de las demás solo absorbe los
-    /// bloques que llevan algo escrito, porque si no el bloque vacío se cuela en la sección buena.
+    /// dejando las últimas sin contenido, y además las titula de mil maneras distintas
+    /// ("Experiencia", "Experiencia Profesional", "EXPERIENCIA LABORAL (EPAM)"). Por eso se agrupa
+    /// por concepto y no por texto: se queda con la primera del mismo concepto, le pone la cabecera
+    /// canónica y absorbe los bloques con contenido de las demás, descartando los vacíos.
     /// </summary>
     private void CoalesceSections(CvDocument cv)
     {
         if (cv.Sections is null || cv.Sections.Count < 2) return;
 
         var kept = new List<CvSection>();
-        var byHeading = new Dictionary<string, CvSection>(StringComparer.Ordinal);
+        var byConcept = new Dictionary<string, CvSection>(StringComparer.Ordinal);
 
         foreach (var section in cv.Sections)
         {
-            var key = CandidateProfileProvider.Normalize(section.Heading ?? string.Empty);
-            if (key.Length == 0) continue;
+            var heading = section.Heading ?? string.Empty;
+            if (CandidateProfileProvider.Normalize(heading).Length == 0) continue;
 
-            if (!byHeading.TryGetValue(key, out var target))
+            var concept = ConceptOf(heading);
+            var key = concept?.Needle ?? CandidateProfileProvider.Normalize(heading);
+
+            if (!byConcept.TryGetValue(key, out var target))
             {
-                byHeading[key] = section;
+                byConcept[key] = section;
                 kept.Add(section);
                 continue;
             }
@@ -275,11 +312,50 @@ public class CvCompilerService
             }
 
             _logger.LogInformation(
-                "Sección repetida '{Heading}': fusionada en la anterior, {Used} bloques útiles y {Empty} vacíos descartados.",
-                section.Heading, useful.Count, (section.Items?.Count ?? 0) - useful.Count);
+                "Sección repetida '{Heading}' del mismo grupo que '{Target}': fusionada, {Used} bloques útiles y {Empty} vacíos descartados.",
+                section.Heading, target.Heading, useful.Count, (section.Items?.Count ?? 0) - useful.Count);
+        }
+
+        // Las secciones de entradas y proyectos tienen que maquetarse como bloques; si el modelo
+        // las devolvió como lista de líneas, el texto se imprimiría sin viñetas ni empresa.
+        foreach (var (needle, _, _) in SectionOrder.Where(s => s.Rank <= 1))
+        {
+            var section = kept.FirstOrDefault(s => ConceptOf(s.Heading ?? string.Empty)?.Needle == needle);
+            if (section is not null && CvSectionKinds.Normalize(section.Kind) != CvSectionKinds.Entries)
+            {
+                _logger.LogInformation(
+                    "Sección '{Heading}': el modelo la devolvió como '{Kind}' y se maqueta como entradas.",
+                    section.Heading, section.Kind);
+
+                section.Kind = CvSectionKinds.Entries;
+            }
+        }
+
+        // Cabecera canónica para que "Experiencia Profesional" y "Experiencia Laboral" no salgan
+        // con dos títulos distintos aunque sean dos secciones distintas.
+        foreach (var section in kept)
+        {
+            var canonical = ConceptOf(section.Heading ?? string.Empty)?.Heading;
+            if (!string.IsNullOrEmpty(canonical) && !string.Equals(section.Heading, canonical, StringComparison.Ordinal))
+            {
+                section.Heading = canonical;
+            }
         }
 
         if (kept.Count != cv.Sections.Count) cv.Sections = kept;
+    }
+
+    /// <summary>Concepto al que pertenece un título de sección, o null si no es uno de los conocidos.</summary>
+    private static (string Needle, int Rank, string Heading)? ConceptOf(string heading)
+    {
+        var normalized = CandidateProfileProvider.Normalize(heading);
+
+        foreach (var concept in SectionOrder)
+        {
+            if (normalized.Contains(concept.Needle, StringComparison.Ordinal)) return concept;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -306,25 +382,10 @@ public class CvCompilerService
     {
         if (cv.Sections is null || cv.Sections.Count < 2) return;
 
-        var order = new Dictionary<string, int>(StringComparer.Ordinal)
-        {
-            ["experienc"] = 0,
-            ["proyect"] = 1,
-            ["habilidad"] = 2,
-            ["tecnolog"] = 2,
-            ["conoc"] = 2,
-            ["formaci"] = 3,
-            ["estudi"] = 3,
-            ["titul"] = 3,
-            ["certific"] = 3,
-            ["idioma"] = 4,
-            ["lengua"] = 4
-        };
-
         var before = cv.Sections.ToList();
 
         cv.Sections = cv.Sections
-            .Select((section, index) => new { section, index, rank = RankOf(section, order) })
+            .Select((section, index) => new { section, index, rank = RankOf(section) })
             .OrderBy(x => x.rank)
             .ThenBy(x => x.index)
             .Select(x => x.section)
@@ -338,17 +399,7 @@ public class CvCompilerService
         }
     }
 
-    private static int RankOf(CvSection section, Dictionary<string, int> order)
-    {
-        var heading = CandidateProfileProvider.Normalize(section.Heading ?? string.Empty);
-
-        foreach (var (needle, rank) in order)
-        {
-            if (heading.Contains(needle, StringComparison.Ordinal)) return rank;
-        }
-
-        return 5;
-    }
+    private static int RankOf(CvSection section) => ConceptOf(section.Heading ?? string.Empty)?.Rank ?? 5;
 
     /// <summary>Como FindSection pero para secciones de líneas, que no son kind = entries.</summary>
     private static CvSection? FindTextSection(List<CvSection> sections, string headingNeedle)
@@ -722,13 +773,7 @@ public class CvCompilerService
             }
 
             // --- CABECERA ---
-            #align(center)[
-              #text(19pt, weight: "bold", fill: primary)[{{EscapeTypst(candidate.FullName.ToUpperInvariant())}}] \
-              #v(2pt)
-              #text(10.5pt, weight: "semibold", fill: accent)[{{EscapeTypst(string.IsNullOrWhiteSpace(doc.Headline) ? candidate.Headline : doc.Headline)}}] \
-              #v(3pt)
-              #text(8.5pt, fill: muted)[{{BuildContactLine(candidate)}}]
-            ]
+            {{BuildHeaderBlock(doc, candidate)}}
 
             #v(0.3em)
 
@@ -825,7 +870,41 @@ public class CvCompilerService
         return "    #list(marker: [\\u{2022}], body-indent: 0.5em, " + content + ")";
     }
 
-    private string BuildContactLine(CandidateConfig candidate)
+    /// <summary>
+    /// Cabecera del CV. Se monta línea a línea porque el modelo devuelve a veces el titular vacío:
+    /// si se imprimiera el bloque entero quedaría una línea en blanco de 19pt y el contacto se
+    /// separaba del nombre sin motivo.
+    /// </summary>
+    private static string BuildHeaderBlock(CvDocument doc, CandidateConfig candidate)
+    {
+        var lines = new List<string>();
+        var fullName = candidate.FullName.Trim();
+        var headline = string.IsNullOrWhiteSpace(doc.Headline) ? candidate.Headline.Trim() : doc.Headline.Trim();
+        var contact = BuildContactLine(candidate);
+
+        if (fullName.Length > 0)
+        {
+            lines.Add($"      #text(19pt, weight: \"bold\", fill: primary)[{EscapeTypst(fullName.ToUpperInvariant())}]");
+        }
+
+        if (headline.Length > 0)
+        {
+            lines.Add($"      #v(2pt)");
+            lines.Add($"      #text(10.5pt, weight: \"semibold\", fill: accent)[{EscapeTypst(headline)}]");
+        }
+
+        if (contact.Length > 0)
+        {
+            lines.Add($"      #v(3pt)");
+            lines.Add($"      #text(8.5pt, fill: muted)[{contact}]");
+        }
+
+        return lines.Count == 0
+            ? string.Empty
+            : "    #align(center)[\n      " + string.Join("\n      ", lines) + "\n    ]";
+    }
+
+    private static string BuildContactLine(CandidateConfig candidate)
     {
         var parts = new List<string>();
 
@@ -974,11 +1053,38 @@ public class CvCompilerService
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Limpia un texto para poder usarlo como nombre de fichero. Las tildes y la eñe se traducen
+    /// a ASCII porque los nombres con acentos fallan al compartir por correo o al subirlos a
+    /// sistemas de ficheros antiguos: "Adrián Espínola" se queda en "Adrian_Espinola".
+    /// </summary>
     private static string SanitizeFileName(string input, int maxLength)
     {
         var invalid = new string(Path.GetInvalidFileNameChars()) + " /\\:*?\"<>|.,&;";
-        var escaped = Regex.Replace(input ?? string.Empty, "[" + Regex.Escape(invalid) + "]+", "_").Trim('_');
+        var ascii = ToAscii(input ?? string.Empty);
+        var escaped = Regex.Replace(ascii, "[" + Regex.Escape(invalid) + "]+", "_").Trim('_');
         return escaped.Length > maxLength ? escaped[..maxLength].Trim('_') : escaped;
+    }
+
+    /// <summary>
+    /// Descompone los signos diacríticos y quita lo que no sea ASCII imprimible. Se hace en dos
+    /// pasos porque quitar primero los caracteres no ASCII deja la base ya separada de las tildes.
+    /// </summary>
+    private static string ToAscii(string value)
+    {
+        var decomposed = value
+            .Normalize(NormalizationForm.FormD)
+            .Where(c => !CharUnicodeInfo.GetUnicodeCategory(c).Equals(UnicodeCategory.NonSpacingMark));
+
+        var ascii = new string(decomposed.ToArray());
+        var sb = new StringBuilder(ascii.Length);
+
+        foreach (var c in ascii)
+        {
+            sb.Append(c is >= ' ' and <= '~' ? c : '_');
+        }
+
+        return sb.ToString();
     }
 
     private void TryDelete(string path)

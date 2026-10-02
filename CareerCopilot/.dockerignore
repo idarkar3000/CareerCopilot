@@ -1,0 +1,16 @@
+# Este fichero va junto al Dockerfile, porque es la raiz del contexto de build:
+# en Render el Root Directory es "CareerCopilot" y el Dockerfile es ./Dockerfile.
+
+# Render copia los Secret Files en la raiz del contexto de build, asi que el
+# "COPY . ." del Dockerfile los dejaria dentro de una capa de la imagen.
+# En runtime siguen disponibles en /etc/secrets/.
+profile.md
+
+# Secretos y datos locales: nunca deben entrar en la imagen
+appsettings.json
+.env
+*.user
+bin/
+obj/
+GeneratedCVs/
+jobs.db

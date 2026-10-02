@@ -60,7 +60,7 @@ public class CandidateConfig
     public string FooterNote { get; set; } = string.Empty;
 
     /// <summary>Plantilla del nombre de fichero: {job} = puesto, {name} = nombre normalizado.</summary>
-    public string PdfFileNameTemplate { get; set; } = "CV_{job}_{name}";
+    public string PdfFileNameTemplate { get; set; } = "{job}_{name}";
 
     /// <summary>Directorio de salida; relativo si no es una ruta absoluta. Por defecto "GeneratedCVs".</summary>
     public string OutputDir { get; set; } = "GeneratedCVs";
