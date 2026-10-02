@@ -766,7 +766,7 @@ public class CvCompilerService
         return $$"""
             #set page(
               paper: "a4",
-              margin: (top: 1.0cm, bottom: 1.0cm, left: 1.4cm, right: 1.4cm)
+              margin: (top: 1.5cm, bottom: 1.0cm, left: 1.4cm, right: 1.4cm)
             )
 
             #set text(
