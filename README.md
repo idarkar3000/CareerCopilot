@@ -1,56 +1,76 @@
-﻿﻿﻿﻿# CareerCopilot ðŸš€ðŸ“„
+# CareerCopilot 🚀📄
 
-CareerCopilot es una soluciÃ³n backend automatizada desarrollada en **C# y .NET 10** orientada a la prospecciÃ³n inteligente de empleo. Analiza ofertas frente a un perfil tÃ©cnico verificado, genera un **CV completo adaptado a cada oferta en JSON** con **Gemini** y lo compila dinÃ¡micamente a **PDF de una sola pÃ¡gina A4** con **Typst**. Todo se notifica en tiempo real mediante un bot de **Telegram**.
+CareerCopilot es una solución backend automatizada desarrollada en **C# y .NET 10** orientada a la prospección inteligente de empleo. Analiza ofertas frente a un perfil técnico verificado, genera un **CV completo adaptado a cada oferta en JSON** con **Gemini** y lo compila dinámicamente a un **PDF de una sola página A4** con **Typst**. Todo se notifica en tiempo real mediante un bot de **Telegram**.
 
-## ðŸ—ï¸ Arquitectura
+## 🏗️ Arquitectura
 
 ```text
-Fuentes (Adzuna / InfoJobs / Feeds RSS) â†’ Scraping + NormalizaciÃ³n â†’ SQLite (deduplicaciÃ³n)
-â†’ GeminiScorerService (evaluaciÃ³n + CvDocument JSON) â†’ CvSanitizer (guardarraÃ­l anti-alucinaciones)
-â†’ CvCompilerService (Typst, ajuste por prioridad y tipografÃ­a hasta 1 pÃ¡gina) â†’ TelegramNotifierService (alertas + PDF)
+Fuentes (Adzuna / InfoJobs / Feeds RSS / LinkedIn / Tecnoempleo)
+       │
+       ▼
+Scraping + Normalización
+       │
+       ▼
+SQLite (deduplicación y persistencia)
+       │
+       ▼
+GeminiScorerService (evaluación técnica + CvDocument JSON)
+       │
+       ▼
+CvSanitizer (guardarraíl anti-alucinaciones contra profile.md)
+       │
+       ▼
+CvCompilerService (Typst, escalonado por prioridad y tipografía hasta 1 página A4)
+       │
+       ▼
+TelegramNotifierService (alertas en tiempo real + CV en PDF adjunto)
 ```
 
-CaracterÃ­sticas clave:
-- **CV dinÃ¡mico por oferta.** Gemini devuelve `CvDocument` completo (headline, summary y secciones tipo `entries`/`texts`). No hay plantilla fija de contenido, solo maquetaciÃ³n.
-- **Ajuste obligatorio a 1 pÃ¡gina A4.** `CvCompilerService` aplica un escalÃ³n de recorte por `priority` (1=imprescindible â†’ 3=secundario) y desciende el tamaÃ±o de letra hasta conseguir 1 pÃ¡gina. Si no cabe, devuelve `null` y no envÃ­a PDF.
-- **GuardarraÃ­l anti-alucinaciones.** `CvSanitizer` valida contra el perfil Ãºnico (`prompts/profile.md`); elimina tokens tÃ©cnicos no respaldados y los reporta en el mensaje de Telegram.
-- **SemÃ¡foro de pipeline.** `Worker` protege contra ejecuciones concurrentes (`_pipelineLock`) para evitar duplicados o sobrecargas en Gemini/Typst.
-- **Filtro de ubicaciÃ³n configurable.** Acepta ofertas con ubicaciÃ³n incluida en `LocationFilter.AcceptedLocations` o con palabras remotas (`RemoteKeywords`); por defecto rechaza fuera de Madrid salvo remoto vÃ¡lido.
+### Características clave:
+- **CV dinámico por oferta:** Gemini devuelve un `CvDocument` completo (`headline`, `summary` y secciones estructuradas de tipo `entries`/`texts`). No existe una plantilla fija de texto, únicamente maquetación adaptativa.
+- **Ajuste estricto a 1 página A4:** `CvCompilerService` aplica un escalón de recorte por `priority` (1 = imprescindible → 3 = secundario) y ajusta de forma adaptativa el tamaño de fuente. Si el documento excede una página, devuelve `null` y no emite un PDF defectuoso.
+- **Guardarraíl anti-alucinaciones:** `CvSanitizer` valida el contenido generado contra el perfil único (`prompts/profile.md`), descartando cualquier token o tecnología no respaldada y notificándolo en el mensaje de Telegram.
+- **Semáforo de pipeline:** `Worker` gestiona la concurrencia (`_pipelineLock`) para evitar ejecuciones simultáneas, duplicados o sobrecargas de cuota en Gemini y Typst.
+- **Filtro geográfico configurable:** Acepta ofertas cuya ubicación coincida con `LocationFilter.AcceptedLocations` o que incluyan términos de teletrabajo en `RemoteKeywords`; descarta ofertas fuera de Madrid salvo que sean explícitamente remotas.
 
-## ðŸ› ï¸ Stack
+---
 
-- **Runtime:** C# 10 / .NET 10 / ASP.NET Core (Hosted Service)
-- **IA:** Google Gemini REST API con fallback entre modelos y reintentos acotados ante `429`/`503` (respeta `Retry-After`)
-- **DocumentaciÃ³n:** Typst CLI (`typst --version`) + PdfPig (validaciÃ³n de pÃ¡ginas)
-- **Persistencia:** SQLite (Microsoft.Data.Sqlite)
-- **Bot:** Telegram.Bot v19
-- **Otros:** System.ServiceModel.Syndication, Microsoft.AspNetCore.OpenApi
+## 🛠️ Stack Tecnológico
 
-## âš™ï¸ ConfiguraciÃ³n (`appsettings.json`)
+- **Runtime & Framework:** C# 10 / .NET 10 / ASP.NET Core (`IHostedService` / `BackgroundService`)
+- **Inteligencia Artificial:** Google Gemini REST API (fallback entre modelos y reintentos ante códigos `429`/`503` respetando cabeceras `Retry-After`)
+- **Generación Documental:** Typst CLI + PdfPig (validación estricta del número de páginas)
+- **Persistencia:** SQLite (`Microsoft.Data.Sqlite`)
+- **Integraciones:** Telegram.Bot SDK
+- **Consumo Web:** `HttpClient`, `System.ServiceModel.Syndication`
 
-La configuraciÃ³n se organiza en `BotConfig`. Usa `appsettings.example.json` como plantilla. El perfil profesional **no** va dentro del JSON (se carga desde disco).
+---
+
+## ⚙️ Configuración (`appsettings.json`)
+
+Toda la configuración se centraliza bajo la clave `BotConfig`. Utiliza `appsettings.example.json` como plantilla base. El perfil profesional no reside en el JSON, sino que se carga directamente desde disco.
 
 ```json
 {
   "BotConfig": {
     "GeminiApiKey": "TU_GEMINI_API_KEY",
     "TelegramBotToken": "TU_TELEGRAM_BOT_TOKEN",
-    "TelegramChatId": TU_CHAT_ID,
+    "TelegramChatId": 0,
     "MinScoreThreshold": 60,
     "CheckIntervalMinutes": 60,
     "CandidateProfileFile": "prompts/profile.md",
     "Candidate": {
-      "FullName": "Nombre Apellidos",
+      "FullName": "Adrián Espínola Gumiel",
       "Headline": "Desarrollador Backend .NET / C#",
       "Email": "correo@ejemplo.com",
-      "Phone": "+00 000 00 00 00",
-      "City": "Ciudad",
-      "Availability": "Disponible inmediatamente",
+      "Phone": "+34 000 00 00 00",
+      "City": "Madrid",
+      "Availability": "Inmediata",
       "PdfFileNameTemplate": "CV_{job}_{name}",
       "OutputDir": "GeneratedCVs",
       "Links": [
-        { "Label": "github.com/tu-usuario", "Url": "https://github.com/tu-usuario" },
-        { "Label": "linkedin.com/in/tu-perfil", "Url": "https://linkedin.com/in/tu-perfil" }
+        { "Label": "[github.com/tu-usuario](https://github.com/tu-usuario)", "Url": "[https://github.com/tu-usuario](https://github.com/tu-usuario)" },
+        { "Label": "[linkedin.com/in/tu-perfil](https://linkedin.com/in/tu-perfil)", "Url": "[https://linkedin.com/in/tu-perfil](https://linkedin.com/in/tu-perfil)" }
       ]
     },
     "LocationFilter": {
@@ -65,107 +85,109 @@ La configuraciÃ³n se organiza en `BotConfig`. Usa `appsettings.example.json` c
 }
 ```
 
-**Notas importantes:**
-- `CandidateProfileFile` apunta a `prompts/profile.md` (copiado a salida). Este es el **Ãºnico origen de verdad** para validar tecnologÃ­as; `CvSanitizer` rechaza cualquier token no respaldado.
-- `Candidate.PdfFileNameTemplate` admite tokens `{job}` (slug de puesto) y `{name}` (slug de nombre). El nombre de archivo nunca contiene espacios.
-- Las credenciales (`GeminiApiKey`, `TelegramBotToken`) son sensibles. No versionar `appsettings.json`. `appsettings.example.json` es la plantilla documentada.
+> **Notas de seguridad:**
+> - `CandidateProfileFile` apunta al archivo `prompts/profile.md`. Es el **único origen de verdad** para validar competencias técnicas; `CvSanitizer` eliminará cualquier tecnología no declarada en este fichero.
+> - `Candidate.PdfFileNameTemplate` acepta los tokens `{job}` (slug del puesto) y `{name}` (slug del nombre normalizado sin espacios).
+> - Nunca subas `appsettings.json` al repositorio si contiene claves reales (`GeminiApiKey`, `TelegramBotToken`). Emplea variables de entorno o Secret Manager en entornos productivos.
 
-## ðŸ§  Perfil del candidato
+---
 
-El perfil completo se encuentra en [`prompts/profile.md`](CareerCopilot/prompts/profile.md). `CandidateProfileProvider` lo carga al arranque (fallback a `BotConfig.CandidateProfile` si falta) y lo tokeniza para alimentar el guardarraÃ­l. El prompt de Gemini recibe este perfil Ã­ntegro y la instrucciÃ³n explÃ­cita de **no inventar tecnologÃ­as, proyectos ni certificaciones no presentes**.
+## 🧠 Perfil del Candidato
 
-### Anclas del CV (empresa, stack, enlaces y descripción)
+El perfil profesional completo reside en [`prompts/profile.md`](CareerCopilot/prompts/profile.md). `CandidateProfileProvider` lo procesa al arrancar y genera los tokens de referencia para el guardarraíl. El prompt enviado a Gemini incluye este perfil íntegro junto con directrices estrictas de evaluación.
 
-Al final de `profile.md` hay un bloque `<!-- cv-anchors -->` con JSON. `CvCompilerService` lo inyecta sobre el documento que devuelve Gemini antes de maquetar:
+### Anclas del CV (bloque `<!-- cv-anchors -->`)
+Al final de `profile.md` se define un bloque JSON estructurado que `CvCompilerService` inyecta sobre el documento devuelto por Gemini antes de procesar el PDF:
 
-- `experience` y `projects` fijan `org`, `dates`, `stack` y `url` cuando el modelo no los aporta.
-- `fallback` se usa como viñeta de reserva cuando el modelo devuelve el bloque sin `bullets`.
-- `points` es el fondo de puntos de cada entrada, uno por competencia. De ahí se eligen las viñetas.
-- Los proyectos que **no** estén en el perfil se descartan, y los del perfil aparecen siempre y en ese orden, sin importar qué modelo responda.
+- **Estructura base:** Fija datos corporativos inmutables (`org`, `dates`, `stack` y `url`) en `experience` y `projects` cuando el modelo no los suministra completos.
+- **Viñetas de reserva (`fallback`):** Entradas por defecto si el modelo devuelve listas vacías.
+- **Banco de competencias (`points`):** Conjunto cerrado de logros y tareas verificadas del candidato de donde se seleccionan las viñetas.
+- **Aislamiento:** Cualquier proyecto o experiencia ajena al perfil queda terminantemente excluida.
 
-Motivo: con el tier gratuito el único modelo con cuota puede devolver las secciones `entries` con el campo `title` como único contenido. Con las anclas, empresa, fechas, stack, enlace y descripción ya no dependen del modelo.
+### Selección de viñetas adaptadas
+La experiencia profesional previa es la sección prioritaria del CV (5 viñetas asignadas por defecto), seguida por los proyectos destacados (3 viñetas):
 
-### Viñetas elegidas por oferta
+1. **Selección semántica con IA:** Gemini escoge del array `points` los hitos que mayor afinidad guarden con los requisitos de la vacante.
+2. **Fallback determinista:** Si el modelo no suministra viñetas suficientes, `CvCompilerService` puntúa los puntos disponibles según la frecuencia de términos compartidos con la oferta y completa el cupo sin consumir cuota adicional.
 
-La experiencia es la sección más importante del CV, así que va siempre la primera, con 5 viñetas, y los proyectos con 3 (BotConfig.ExperienceBullets y BotConfig.ProjectBullets).
+Al ajustar el documento al límite estricto de una página A4, la regla de recorte prioriza siempre la experiencia laboral frente a los proyectos personales.
 
-Las viñetas se eligen en dos capas:
+### Generación local sin conexión a Gemini (`/cvlocal`)
+El bloque de anclas incluye un objeto base completo (`summary`, `skills`, `education`, `languages`). Con ello, `LocalCvBuilder` puede compilar un CV válido sin invocar la API de Gemini:
 
-1. **Gemini** elige del array `points` del perfil los que mejor encajen con la oferta.
-2. Si el modelo no devuelve `bullets` o no llega al número pedido, `CvCompilerService` los completa puntuando por las palabras que comparte con el título y la descripción de la oferta, y se queda con los mejores.
+- `/cv <id> local` o `/cvlocal <id>`: Fuerza el renderizado local de una oferta registrada en base de datos.
+- `/cvlocal <título> || <descripción>`: Genera el CV a partir de texto arbitrario pegado directamente en Telegram.
+- Fallback automático: Si la llamada a Gemini agota cuota o falla, el bot recurre a este modo local y lo especifica en el aviso.
 
-La segunda capa no consume cuota y es determinista, así que los cinco puntos de EPAM **no son los mismos en todos los CV**: para una oferta de DevOps sale primero Azure DevOps y CI/CD, y para una de SQL sale Dapper y la optimización de Informix.
-
-El recorte a una página también respeta esa prioridad: cuando hay que apretar, se recortan primero las viñetas de los proyectos y la experiencia es lo último que se toca.
-
-### CV local sin Gemini (/cv <id> local)
-
-El bloque de anclas incluye además un objeto profile con summary, skills, education y languages, todo copiado del perfil. Con eso LocalCvBuilder monta un CV completo sin llamar a Gemini, útil cuando la cuota diaria está agotada:
-
-- /cv <id> local o /cvlocal <id>: fuerza el modo local de una oferta ya registrada.
-- /cvlocal <título> || <descripción>: genera el CV de una oferta pegada, para cuando no hay cuota y nunca llegó a registrarse.
-- /cv <id> sin local: si Gemini no responde, cae a modo local automáticamente y avisa.
-
-La experiencia y los proyectos se dejan vacíos a propósito en el documento local: los rellena ApplyAnchors igual que cuando el documento viene del modelo, así los dos caminos comparten la lógica que elige las viñetas.
-
-El CV local **no se envía solo** a Telegram: sin evaluación del modelo no hay base para decidir a quién escribir. En su lugar el mensaje enseña qué palabras clave de RequiredKeywords aparecen en la oferta y cuáles no, y avisa de que el texto no está adaptado.
-
-Si el bloque falta o su JSON es inválido, se registra un aviso y el CV se genera tal cual lo devuelva el modelo, sin fallar.
+---
 
 ## 📖 Comandos de Telegram
 
-
-| Comando | DescripciÃ³n |
+| Comando | Descripción |
 |---|---|
-| `/start` / `/help` | Muestra ayuda y comandos disponibles. |
-| `/status` | Estado del servicio, ofertas procesadas, pendientes y CVs pendientes de regenerar. |
-| `/run` | Fuerza un ciclo inmediato (scraping + evaluaciÃ³n). Respeta el semÃ¡foro de pipeline. |
-| `/cv <id>` | Regenera y envÃ­a el CV para una oferta procesada (por ID interno). Usa HTML y envÃ­a mensaje + PDF por separado para mÃ¡xima robustez. |
-| `/unmark <id>` | Marca una oferta procesada como no procesada para que vuelva a evaluarse. |
-| `/stats` | EstadÃ­sticas de base de datos (totales, procesadas, score medio). |
-| `/addreq <keyword>` | AÃ±ade palabra clave obligatoria (case-insensitive). |
-| `/remreq <keyword>` | Elimina palabra clave obligatoria. |
-| `/addexc <keyword>` | AÃ±ade palabra clave excluyente. |
-| `/remexc <keyword>` | Elimina palabra clave excluyente. |
-| `/listfilters` | Lista filtros activos (required/excluded). |
+| `/start` / `/help` | Muestra el panel de ayuda y los comandos disponibles. |
+| `/status` | Estado operativo del worker, recuento de ofertas procesadas y pendientes. |
+| `/run` | Dispara un ciclo completo inmediato (scraping + evaluación). |
+| `/scan <término>` | Rastreo puntual para un término de búsqueda sin guardarlo en el histórico. |
+| `/cv <id>` | Regenera y envía el CV maquetado para una oferta registrada por su ID. |
+| `/cvlocal <id>` | Genera el CV en modo determinista local sin consumir API de IA. |
+| `/unmark <id>` | Desmarca una oferta para permitir su reevaluación. |
+| `/stats` | Métricas generales de base de datos (ofertas, puntuación media, descartes). |
+| `/addjob <término>` | Añade un término de búsqueda recurrente al worker. |
+| `/deljob <término>` | Elimina un término de búsqueda recurrente. |
+| `/addreq <keyword>` | Añade una palabra clave técnica obligatoria. |
+| `/remreq <keyword>` | Elimina una palabra clave obligatoria. |
+| `/addexc <keyword>` | Añade una palabra clave de exclusión. |
+| `/remexc <keyword>` | Elimina una palabra clave de exclusión. |
+| `/filters` | Consulta la lista activa de palabras obligatorias y excluidas. |
+| `/threshold <0-100>` | Modifica el umbral mínimo de puntuación para generar CV y avisar. |
 
-## ðŸ§ª Pruebas de humo (Typst + guardarraÃ­l)
+---
 
-Para validar que el compilador genera **exactamente 1 pÃ¡gina A4** y que el guardarraÃ­l funciona sin false positives, hay un proyecto de humo en `C:\Users\espin\AppData\Local\Temp\opencode\CvSmoke\`. EjecuciÃ³n:
+## 🧪 Pruebas de Humo (Typst + Guardarraíl)
+
+Para validar que la plantilla Typst compila exactamente en **1 página A4** y verificar la ausencia de falsos positivos en el sanitizador, se puede ejecutar el proyecto de test:
 
 ```powershell
-dotnet run --project "C:\Users\espin\AppData\Local\Temp\opencode\CvSmoke\CvSmoke.csproj" --no-build
+dotnet run --project "CvSmoke/CvSmoke.csproj"
 ```
 
-Salida esperada: `1 pÃ¡gina(s)`. PdfPig confirma el recuento de pÃ¡ginas. Las violaciones detectadas deben corresponder Ãºnicamente a tecnologÃ­as ausentes del perfil (ej. `terraform`, `kafka`...).
+El validador inspecciona el PDF resultante con `PdfPig` y confirma que el recuento sea exactamente igual a `1`.
 
-## ðŸš€ EjecuciÃ³n
+---
+
+## 🚀 Despliegue y Ejecución
 
 ### Requisitos previos
-- .NET 10 SDK
-- [Typst CLI](https://github.com/typst/typst/releases) en `PATH` (`typst --version`)
+- [.NET 10 SDK](https://dotnet.microsoft.com/)
+- [Typst CLI](https://github.com/typst/typst/releases) instalado y accesible en la variable de entorno `PATH` (`typst --version`).
 
-### Local
+### Ejecución Local
 ```powershell
-cd "C:\Users\espin\Desktop\Programacion\CareerCopilot\CareerCopilot"
-cp appsettings.example.json appsettings.json  # editar credenciales
-dotnet build CareerCopilot.slnx
-dotnet run --project CareerCopilot
+# Acceder al directorio del proyecto
+cd CareerCopilot
+
+# Restaurar dependencias y compilar
+dotnet build
+
+# Ejecutar el servicio
+dotnet run
 ```
 
-### Docker
-El proyecto mantiene compatibilidad con Docker multi-stage (binario independiente + Typst). Consultar `Dockerfile` para detalles.
+### Contenedores (Docker)
+El servicio está preparado para empaquetarse en arquitecturas Linux basadas en imágenes base de ASP.NET Core junto con la descarga del binario estático de `typst`.
 
-## ðŸ“Œ Notas de diseÃ±o
+---
 
-- **Un Ãºnico prompt, una Ãºnica respuesta.** Gemini devuelve `evaluation` + `cv` completo en JSON estricto (response schema). No se hacen llamadas por partes.
-- **Fuente Ãºnica de verdad.** `prompts/profile.md` es la base para generar y para validar. Cualquier ajuste al perfil debe hacerse ahÃ­.
-- **No hay alucinaciones toleradas.** Si una tecnologÃ­a no aparece en el perfil, el `CvSanitizer` la elimina. El CV jamÃ¡s inventa certificaciones.
-- **Estrictamente 1 pÃ¡gina.** La decisiÃ³n de no enviar PDF cuando no cabe en A4 es deliberada (calidad sobre cantidad).
-- **Sin commits automÃ¡ticos.** Nunca se hace `git commit` sin solicitud explÃ­cita del usuario.
-- **RotaciÃ³n de credenciales.** Durante el rediseÃ±o aparecieron claves en texto plano en la conversaciÃ³n: se recomienda **rotar** `GeminiApiKey` y `TelegramBotToken` al terminar el uso de desarrollo.
+## 📌 Principios de Diseño
 
-## Licencia
+- **Contrato JSON estricto:** Gemini responde bajo un esquema estructurado validado (`responseSchema`), evitando parseos frágiles de texto libre.
+- **Tolerancia cero a las alucinaciones:** Ningún dato no presente explícitamente en el perfil del candidato llega al documento final.
+- **Diseño a 1 sola página:** Un CV de longitud superior a una cara es descartado por el compilador para mantener un estándar profesional.
+- **Resiliencia de red:** Backoff exponencial y rotación ordenada entre modelos de Gemini ante errores de cuota o saturación (`429`, `503`).
 
-MIT License. Ver [LICENSE](LICENSE) si existe.
+---
 
+## 📄 Licencia
+
+Este proyecto está bajo la Licencia [MIT](LICENSE). Siéntete libre de utilizarlo, modificarlo y adaptarlo a tu propio flujo de búsqueda técnica.
