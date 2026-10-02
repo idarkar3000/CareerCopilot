@@ -3,6 +3,13 @@
 public class BotConfig
 {
     public string GeminiApiKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Segundos que se espera a Gemini antes de dar el modelo por saturado. Las llamadas buenas
+    /// tardan unos 4s, así que con 20s se distinguen de las que se quedan colgadas sin responder.
+    /// </summary>
+    public int GeminiTimeoutSeconds { get; set; } = 20;
+
     public string TelegramBotToken { get; set; } = string.Empty;
     public long TelegramChatId { get; set; }
     public int MinScoreThreshold { get; set; } = 75;

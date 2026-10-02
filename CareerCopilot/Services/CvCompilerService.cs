@@ -18,7 +18,7 @@ public class CvCompilerService
     private readonly BotConfig _config;
     private readonly CandidateProfileProvider _profile;
 
-    private const int MaxSummaryChars = 550;   // párrafo de 3 líneas
+    private const int MaxSummaryChars = 300;   // dos líneas; el prompt pide 200-280 y esto es el seguro
     private const int MaxBulletChars = 240;    // 2 líneas
     private const int MaxLineChars = 240;      // línea tipo "Lenguajes: ..."
     private const int MaxFieldChars = 90;      // título, empresa, fechas, stack
@@ -105,15 +105,15 @@ public class CvCompilerService
                 if (i > 0)
                 {
                     _logger.LogInformation(
-                        "CV ajustado en el intento {Attempt}/{Total}: {Size}pt, secciones con prioridad >= {Drop} eliminadas, máx. {Bullets} viñetas.",
-                        i + 1, FitLadder.Length, fontSize, dropPriorityAtOrAbove, maxBullets);
+                        "CV ajustado en el intento {Attempt}/{Total}: {Size}pt{Recorte}.",
+                        i + 1, FitLadder.Length, fontSize, DescribeTrim(dropPriorityAtOrAbove, maxBullets, experienceBullets));
                 }
                 return pdfFile;
             }
 
             _logger.LogWarning(
-                "CV compilado con {Pages} páginas (intento {Attempt}/{Total}: {Size}pt, recorte desde prioridad {Drop}); reajustando.",
-                pageCount, i + 1, FitLadder.Length, fontSize, dropPriorityAtOrAbove);
+                "CV compilado con {Pages} páginas (intento {Attempt}/{Total}: {Size}pt{Recorte}); reajustando.",
+                pageCount, i + 1, FitLadder.Length, fontSize, DescribeTrim(dropPriorityAtOrAbove, maxBullets, experienceBullets));
         }
 
         _logger.LogError(
@@ -565,6 +565,30 @@ public class CvCompilerService
         }
 
         return maxBullets > 0 ? maxBullets : MaxBulletsDefault;
+    }
+
+    /// <summary>
+    /// Describe lo que recorta un peldaño. Los cuatro primeros solo bajan el cuerpo de letra, y sin
+    /// esto el log parecía anunciar que se habían eliminado secciones cuando no se había quitado nada.
+    /// </summary>
+    private static string DescribeTrim(int dropPriorityAtOrAbove, int maxBullets, int experienceBullets)
+    {
+        var parts = new List<string>
+        {
+            dropPriorityAtOrAbove > 0
+                ? $"secciones de prioridad >= {dropPriorityAtOrAbove} eliminadas"
+                : "sin secciones eliminadas"
+        };
+
+        if (maxBullets > 0) parts.Add($"máximo {maxBullets} viñetas en proyectos y habilidades");
+
+        // El primer peldaño deja la experiencia en MaxBulletsDefault; solo se avisa cuando baja
+        if (experienceBullets > 0 && experienceBullets < MaxBulletsDefault)
+        {
+            parts.Add($"{experienceBullets} viñetas en la experiencia");
+        }
+
+        return ", " + string.Join(", ", parts);
     }
 
     private List<CvSection> ApplyTrim(List<CvSection> sections, int dropPriorityAtOrAbove, int maxBullets, int experienceBullets)

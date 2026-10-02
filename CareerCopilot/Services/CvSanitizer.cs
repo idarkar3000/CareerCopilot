@@ -47,6 +47,11 @@ public class CvSanitizer
     // Se comparan normalizados: "CSharp" -> "csharp", "AspNetCore" -> "aspnetcore"
     private static readonly string[] BrandNoise = { "core", "framework", "sdk", "latest" };
 
+    // Medidas de tiempo y tamaño: "60s", "10ms", "24h". Son datos, no tecnologías, así que el
+    // perfil escribe "60 s" con espacio y el modelo "60s" y el guardarraíl lo rechazaba.
+    private static readonly Regex MeasurementPattern =
+        new(@"^\d+(ms|s|m|h|d|w)$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     // Solo estas palabras cuentan como tecnología verificable. Cualquier otra minúscula es
     // redacción normal y no se toca, porque un CV no puede usar solo el vocabulario del perfil
     private static readonly HashSet<string> KnownTechnologies = new(StringComparer.Ordinal)
@@ -133,7 +138,10 @@ public class CvSanitizer
                 item.Dates = Check("dates", item.Dates, violations);
                 item.Stack = Check("stack", item.Stack, violations);
                 item.Url = CheckUrl(item.Url, violations);
-                item.UrlLabel = Check("urlLabel", item.UrlLabel, violations);
+
+                // El texto del enlace no pasa por el guardarraíl: solo se pinta junto a una URL ya
+                // comprobada, y aquí se tomaba por tecnología inventada ("README.md" -> "readmemd").
+                item.UrlLabel = item.UrlLabel?.Trim();
 
                 if (item.Bullets is { Count: > 0 })
                 {
@@ -336,7 +344,10 @@ public class CvSanitizer
         if (KnownTechnologies.Contains(normalized)) return true;
 
         // "ES6", ".NET8", "SQL92": letras y cifras juntas. Un número suelto ("2026") no cuenta
-        if (normalized.Any(char.IsDigit)) return normalized.Any(char.IsLetter);
+        if (normalized.Any(char.IsDigit))
+        {
+            return normalized.Any(char.IsLetter) && !MeasurementPattern.IsMatch(normalized);
+        }
 
         if (core.Contains('#') || core.Contains('+')) return true;
         if (core.Contains('.') && core.Any(char.IsLetter)) return true;

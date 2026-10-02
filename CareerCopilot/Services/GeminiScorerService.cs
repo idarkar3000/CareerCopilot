@@ -21,6 +21,15 @@ public class GeminiScorerService
     // Modelos marcados como agotados hasta su reset diario (medianoche hora del Pacífico)
     private readonly Dictionary<string, DateTimeOffset> _exhaustedModels = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Fallos seguidos por modelo. Google responde 503 cuando un modelo está saturado, y eso no
+    /// marca cuota agotada, así que se cuenta y solo se salta el modelo cuando insiste.
+    /// </summary>
+    private readonly Dictionary<string, int> _failures = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Fallos seguidos a partir de los cuales un modelo se deja de llamar.</summary>
+    private const int MaxConsecutiveFailures = 3;
+
     private readonly Lock _quotaLock = new();
 
     /// <summary>Último modelo que devolvió una evaluación válida; se prueba primero.</summary>
@@ -114,6 +123,7 @@ public class GeminiScorerService
         foreach (var model in expired)
         {
             _exhaustedModels.Remove(model);
+            _failures.Remove(model);
             _logger.LogInformation("Cuota repuesta para el modelo {Model}; vuelve a estar disponible.", model);
         }
     }
@@ -122,12 +132,54 @@ public class GeminiScorerService
     {
         lock (_quotaLock)
         {
-            var resume = DateTimeOffset.UtcNow.NextPacificMidnight();
-            _exhaustedModels[model] = resume;
+            _failures.Remove(model);
+            MarkExhaustedLocked(model);
+        }
+    }
 
-            _logger.LogWarning(
-                "Modelo {Model} marcado como agotado hasta las {Reset:HH:mm} (hora del Pacífico). Se dejará de llamar hasta entonces.",
-                model, resume.ToPacificTime());
+    private void MarkExhaustedLocked(string model)
+    {
+        var resume = DateTimeOffset.UtcNow.NextPacificMidnight();
+        _exhaustedModels[model] = resume;
+
+        _logger.LogWarning(
+            "Modelo {Model} marcado como agotado hasta las {Reset:HH:mm} (hora del Pacífico). Se dejará de llamar hasta entonces.",
+            model, resume.ToPacificTime());
+    }
+
+    /// <summary>
+    /// Anota un fallo del modelo. Un 429 es definitivo y lo aparta enseguida; un 503 o un timeout
+    /// solo lo apartan cuando se repiten, para no perder el modelo por un pico puntual de demanda.
+    /// </summary>
+    private void RegisterFailure(string model, bool definitive)
+    {
+        lock (_quotaLock)
+        {
+            if (definitive)
+            {
+                _failures.Remove(model);
+                MarkExhaustedLocked(model);
+                return;
+            }
+
+            var count = _failures.GetValueOrDefault(model) + 1;
+            if (count < MaxConsecutiveFailures)
+            {
+                _failures[model] = count;
+                return;
+            }
+
+            _failures.Remove(model);
+            MarkExhaustedLocked(model);
+        }
+    }
+
+    /// <summary>El modelo respondió bien, así que se le olvida todo lo anterior.</summary>
+    private void RegisterSuccess(string model)
+    {
+        lock (_quotaLock)
+        {
+            _failures.Remove(model);
         }
     }
 
@@ -155,6 +207,7 @@ public class GeminiScorerService
                     var result = TryParseEvaluation(rawBody, model);
                     if (result != null)
                     {
+                        RegisterSuccess(model);
                         _logger.LogInformation("Evaluado y adaptado con éxito usando el modelo: {Model}", model);
                         return result;
                     }
@@ -167,7 +220,9 @@ public class GeminiScorerService
 
                 if (statusCode is 429 or 503)
                 {
-                    if (statusCode == 429) MarkExhausted(model);
+                    // 429 es cuota agotada; 503 es demanda alta y puede ser un pico pasajero
+                    var motivo = statusCode == 429 ? "sin cuota" : "saturado";
+                    RegisterFailure(model, definitive: statusCode == 429);
 
                     if (attempt < maxAttempts)
                     {
@@ -175,20 +230,31 @@ public class GeminiScorerService
                         wait = Math.Clamp(wait, 1, maxWaitSeconds);
 
                         _logger.LogWarning(
-                            "Modelo {Model} sin cuota ({Code}). Reintento {Next}/{Max} en {Wait}s.",
-                            model, statusCode, attempt + 1, maxAttempts, wait);
+                            "Modelo {Model} {Motivo} ({Code}). Reintento {Next}/{Max} en {Wait}s.",
+                            model, motivo, statusCode, attempt + 1, maxAttempts, wait);
 
                         await Task.Delay(TimeSpan.FromSeconds(wait), ct);
                         continue;
                     }
 
                     _logger.LogWarning(
-                        "Modelo {Model} agotado ({Code}) tras {Attempts} intentos: {Body}",
-                        model, statusCode, maxAttempts, Summarize(errorBody));
+                        "Modelo {Model} {Motivo} ({Code}) tras {Attempts} intentos: {Body}",
+                        model, motivo, statusCode, maxAttempts, Summarize(errorBody));
                     return null;
                 }
 
                 _logger.LogWarning("Respuesta no exitosa ({Model}): {Code} - {Body}", model, statusCode, Summarize(errorBody));
+                return null;
+            }
+            catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // El timeout del HttpClient, no una cancelación: el modelo se quedó colgado
+                RegisterFailure(model, definitive: false);
+
+                _logger.LogWarning(
+                    "Modelo {Model} no respondió en {Timeout:N0}s y se da por saturado.",
+                    model, _http.Timeout.TotalSeconds);
+
                 return null;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -254,7 +320,7 @@ public class GeminiScorerService
                - Si una entrada no trae 'bullets', elige los 5 (experiencia) o 3 (proyecto) primeros puntos de su 'points'.
             4. Estructura del CV ('cv'):
                - 'headline': una línea, el puesto al que aspiras (ej. "Desarrollador Backend .NET / C#").
-               - 'summary': párrafo de 3 líneas en primera persona, entre 400 y 550 caracteres, que exponga tu base en C#, ASP.NET Core, microservicios y bases de datos relacionales y la conecte con la vacante. Sin listas ni corchetes.
+               - 'summary': dos líneas en primera persona, entre 200 y 280 caracteres, que exponga tu base en C#, ASP.NET Core, microservicios y bases de datos relacionales y la conecte con la vacante. Sin listas ni corchetes. Es un CV de una página: si te pasas, la última sección se queda fuera.
                - 'sections': entre 4 y 5 secciones, siempre en este conjunto y siempre estas, en este orden:
                   * "Experiencia Laboral" (kind "entries", priority 1): la de EPAM Neoris. 'title', 'org', 'dates', 'stack' son OBLIGATORIOS y ningún item puede quedar solo con 'title'.
                   * "Proyectos" (kind "entries", priority 1 o 2): 'title', 'stack' y 3 'bullets' son obligatorios en cada proyecto, y 'url' es OBLIGATORIA siempre que el proyecto tenga repositorio en el perfil. 'dates' solo si las tienes.

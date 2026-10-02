@@ -11,7 +11,11 @@ builder.Services.AddSingleton<JobDatabase>();
 builder.Services.AddSingleton<CandidateProfileProvider>();
 builder.Services.AddSingleton<CvSanitizer>();
 builder.Services.AddHttpClient<JobScraperService>();
-builder.Services.AddHttpClient<GeminiScorerService>();
+builder.Services.AddHttpClient<GeminiScorerService>(client =>
+{
+    // Sin esto se hereda el valor por defecto de HttpClient, que son 100s por llamada
+    client.Timeout = TimeSpan.FromSeconds(Math.Clamp(botConfig.GeminiTimeoutSeconds, 5, 90));
+});
 builder.Services.AddSingleton<CvCompilerService>();
 builder.Services.AddSingleton<LocalCvBuilder>();
 
