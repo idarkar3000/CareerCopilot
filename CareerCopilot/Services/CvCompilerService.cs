@@ -142,9 +142,17 @@ public class CvCompilerService
         var namePart = SanitizeFileName(candidate.FullName, 40);
         var jobPart = SanitizeFileName(job.Title, 25);
 
-        return string.IsNullOrWhiteSpace(jobPart) || string.IsNullOrWhiteSpace(namePart)
-            ? $"CV_{Guid.NewGuid():N}"[..40]
-            : SanitizeFileName(template.Replace("{job}", jobPart).Replace("{name}", namePart), 90);
+        // Sin nombre o sin puesto la plantilla no sirve y se cae a un nombre único. Ojo: el
+        // identificador son 35 caracteres, así que aquí no se puede recortar a 40.
+        if (string.IsNullOrWhiteSpace(jobPart) || string.IsNullOrWhiteSpace(namePart))
+        {
+            _logger.LogWarning(
+                "Falta BotConfig:Candidate:FullName o el título de la oferta está vacío; el PDF se nombra con un identificador único.");
+
+            return $"CV_{Guid.NewGuid():N}";
+        }
+
+        return SanitizeFileName(template.Replace("{job}", jobPart).Replace("{name}", namePart), 90);
     }
 
     /// <summary>

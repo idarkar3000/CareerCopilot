@@ -191,7 +191,7 @@ public class Worker : BackgroundService, IManualActions
             foreach (var offer in uniqueOffers)
             {
                 if (ct.IsCancellationRequested) break;
-                await ProcessOfferAsync(offer, ct);
+                await ProcessOfferSafelyAsync(offer, ct);
             }
 
             return true;
@@ -199,6 +199,22 @@ public class Worker : BackgroundService, IManualActions
         finally
         {
             EndPipeline();
+        }
+    }
+
+    /// <summary>
+    /// Procesa una oferta sin dejar que un fallo tumbe el ciclo entero. Un CV que no se compila no
+    /// puede costar las 69 ofertas que faltaban por evaluar.
+    /// </summary>
+    private async Task ProcessOfferSafelyAsync(JobOffer offer, CancellationToken ct)
+    {
+        try
+        {
+            await ProcessOfferAsync(offer, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Fallo al procesar '{Title}'; se sigue con el resto del ciclo.", offer.Title);
         }
     }
 
@@ -247,7 +263,7 @@ public class Worker : BackgroundService, IManualActions
             foreach (var offer in uniqueOffers)
             {
                 if (ct.IsCancellationRequested) break;
-                await ProcessOfferAsync(offer, ct);
+                await ProcessOfferSafelyAsync(offer, ct);
             }
 
             _logger.LogInformation("=== Fin del escaneo puntual (/scan) para: '{Query}' ===", query);
