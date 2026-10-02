@@ -75,6 +75,14 @@ public class CvItem
     [JsonPropertyName("urlLabel")]
     public string? UrlLabel { get; set; }
 
+    /// <summary>
+    /// Marca que el texto del enlace viene del perfil y no del modelo. Es interno del compilador,
+    /// asi que no se serializa a Gemini. Sirve para no recortar un texto de enlace que ya es
+    /// correcto: el limite de caracteres es para el texto que se inventa, no para el dato bueno.
+    /// </summary>
+    [JsonIgnore]
+    public bool FromProfile { get; set; }
+
     [JsonPropertyName("bullets")]
     public List<string>? Bullets { get; set; }
 }

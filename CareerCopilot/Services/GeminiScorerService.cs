@@ -320,7 +320,7 @@ public class GeminiScorerService
                - Si una entrada no trae 'bullets', elige los 5 (experiencia) o 3 (proyecto) primeros puntos de su 'points'.
             4. Estructura del CV ('cv'):
                - 'headline': una línea, el puesto al que aspiras (ej. "Desarrollador Backend .NET / C#").
-               - 'summary': dos líneas en primera persona, entre 200 y 280 caracteres, que exponga tu base en C#, ASP.NET Core, microservicios y bases de datos relacionales y la conecte con la vacante. Sin listas ni corchetes. Es un CV de una página: si te pasas, la última sección se queda fuera.
+               - 'summary': dos o tres líneas en primera persona, entre 200 y 320 caracteres, que exponga tu base en C#, ASP.NET Core, microservicios y bases de datos relacionales, la conecte con la vacante y cierre con una APTITUD del apartado "Aptitudes" del perfil (adaptarse a equipos, trabajar en equipo, dejar el código mejor, curiosidad). Sin listas ni corchetes. Es un CV de una página: si te pasas, la última sección se queda fuera.
                - 'sections': entre 4 y 5 secciones, siempre en este conjunto y siempre estas, en este orden:
                   * "Experiencia Laboral" (kind "entries", priority 1): la de EPAM Neoris. 'title', 'org', 'dates', 'stack' son OBLIGATORIOS y ningún item puede quedar solo con 'title'.
                   * "Proyectos" (kind "entries", priority 1 o 2): 'title', 'stack' y 3 'bullets' son obligatorios en cada proyecto, y 'url' es OBLIGATORIA siempre que el proyecto tenga repositorio en el perfil. 'dates' solo si las tienes.

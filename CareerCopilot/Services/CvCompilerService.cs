@@ -18,7 +18,7 @@ public class CvCompilerService
     private readonly BotConfig _config;
     private readonly CandidateProfileProvider _profile;
 
-    private const int MaxSummaryChars = 300;   // dos líneas; el prompt pide 200-280 y esto es el seguro
+    private const int MaxSummaryChars = 340;   // tres líneas; el prompt pide 200-280 y esto es el seguro
     private const int MaxBulletChars = 240;    // 2 líneas
     private const int MaxLineChars = 240;      // línea tipo "Lenguajes: ..."
     private const int MaxFieldChars = 90;      // título, empresa, fechas, stack
@@ -452,10 +452,15 @@ public class CvCompilerService
             if (string.IsNullOrWhiteSpace(item.Dates)) item.Dates = anchor.Dates;
             if (string.IsNullOrWhiteSpace(item.Stack)) item.Stack = anchor.Stack;
 
-            if (string.IsNullOrWhiteSpace(item.Url) && !string.IsNullOrWhiteSpace(anchor.Url))
+            // El enlace es un dato del perfil, no del modelo: si hay ancla, su URL y su texto
+            // prevalecen siempre. Antes solo se aplicaba cuando el modelo no traia URL, y como
+            // este siempre trae una, el texto del perfil se descartaba y se imprimia el suyo,
+            // que llega inflado con el org y el stack pegados detras.
+            if (!string.IsNullOrWhiteSpace(anchor.Url))
             {
                 item.Url = anchor.Url;
                 item.UrlLabel = string.IsNullOrWhiteSpace(anchor.UrlLabel) ? item.UrlLabel : anchor.UrlLabel;
+                if (!string.IsNullOrWhiteSpace(item.UrlLabel)) item.FromProfile = true;
             }
 
             item.Bullets = BuildBullets(anchor, item, job, bulletLimit);
@@ -692,6 +697,7 @@ public class CvCompilerService
                     Stack = item.Stack,
                     Url = item.Url,
                     UrlLabel = item.UrlLabel,
+                    FromProfile = item.FromProfile,
                     Bullets = item.Bullets is null ? null : new List<string>(item.Bullets)
                 };
 
@@ -811,7 +817,15 @@ public class CvCompilerService
         var rightContent = dates;
         if (!string.IsNullOrWhiteSpace(item.Url))
         {
-            var label = string.IsNullOrWhiteSpace(item.UrlLabel) ? "github.com" : PrepareText(item.UrlLabel, MaxFieldChars);
+            // El texto del perfil se imprime entero aunque sea largo: es el dato correcto y
+            // recortarlo dejaria "github.com/.../Pdf_Signer". El del modelo, que puede venir
+            // inflado con el stack pegado, si pasa por el limite de campo.
+            var label = string.IsNullOrWhiteSpace(item.UrlLabel)
+                ? "github.com"
+                : item.FromProfile
+                    ? PrepareText(item.UrlLabel, int.MaxValue)
+                    : PrepareText(item.UrlLabel, MaxFieldChars);
+
             var url = item.Url.Replace("\\", string.Empty).Replace("\"", string.Empty);
             var link = "#link(\"" + url + "\")[" + label + "]";
             rightContent = string.IsNullOrWhiteSpace(rightContent) ? link : rightContent + " #linebreak() " + link;
