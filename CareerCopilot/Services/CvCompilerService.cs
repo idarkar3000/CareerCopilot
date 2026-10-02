@@ -257,7 +257,8 @@ public class CvCompilerService
         section.Items ??= new List<CvItem>();
         foreach (var line in existing)
         {
-            if (section.Items.Any(i => TitlesMatch(i.Label, line.Label))) continue;
+            // Si la sección ya tiene la línea —con el nombre que puso el modelo— no se añade otra
+            if (section.Items.Any(i => LabelsMatch(i.Label, line.Label))) continue;
             section.Items.Add(new CvItem { Label = line.Label, Text = line.Text });
         }
     }
@@ -595,6 +596,17 @@ public class CvCompilerService
         return shortest >= 4 &&
                (a.Contains(b, StringComparison.Ordinal) || b.Contains(a, StringComparison.Ordinal));
     }
+
+    /// <summary>
+    /// Igual que TitlesMatch pero para las líneas de texto (formación, idiomas, habilidades), donde
+    /// el modelo escribe el nombre oficial completo y el perfil lo guarda abreviado: "Técnico
+    /// Superior en Animación 3D y Videojuegos" frente a "Técnico Superior en Animación 3D, Juegos y
+    /// Entornos Interactivos". Ahí la contención falla porque las dos cadenas divergen justo donde
+    /// una acaba y la otra sigue, así que se comparan las palabras con contenido: si comparten la
+    /// mayoría, son la misma línea y no se añade la del perfil por encima.
+    /// </summary>
+    private static bool LabelsMatch(string? left, string? right) =>
+        TitlesMatch(left, right) || SaysSameThing(left ?? string.Empty, right ?? string.Empty);
 
     private static string MatchKey(string? value) =>
         new((value ?? string.Empty)
