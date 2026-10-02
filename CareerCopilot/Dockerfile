@@ -1,7 +1,7 @@
 # -------------------------------------------------------------
 # Etapa 1: Build y Publish
 # -------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:10.0-preview AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Copiar csproj y restaurar dependencias
@@ -15,7 +15,7 @@ RUN dotnet publish "CareerCopilot.csproj" -c Release -o /app/publish /p:UseAppHo
 # -------------------------------------------------------------
 # Etapa 2: Runtime Final
 # -------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview AS final
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 
 # Instalar dependencias del sistema y tipografías para Typst

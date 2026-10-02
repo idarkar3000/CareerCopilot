@@ -20,5 +20,8 @@ appsettings.json
 appsettings.Development.json
 .env
 
+# Perfil personal: contiene nombre, teléfono, correo y ubicación. Es datos reales, no plantilla.
+CareerCopilot/prompts/profile.md
+
 # Mantener solo la plantilla de ejemplo
 !appsettings.example.json

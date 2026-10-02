@@ -1,56 +1,98 @@
 ﻿using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using CareerCopilot.Models;
 using UglyToad.PdfPig;
-using System.Globalization;
 
 namespace CareerCopilot.Services;
 
+/// <summary>
+/// Maqueta en Typst el documento que devuelve Gemini. No fija ningún contenido: solo coloca las
+/// secciones generadas. Para que quepa en una página A4 primero recorta por prioridad y luego
+/// baja el cuerpo de letra.
+/// </summary>
 public class CvCompilerService
 {
     private readonly ILogger<CvCompilerService> _logger;
-    private const int MaxSummaryChars = 850;      // Párrafo 4 a 6 linas mas o menos
-    private const int MaxBulletChars = 240;       // 2 líneas completas
+    private readonly BotConfig _config;
+    private readonly CandidateProfileProvider _profile;
 
-    // Escala de tamaños de fuente adaptativa para 1 sola página A4
-    private static readonly decimal[] FontSizeLadder = { 9.0m, 8.7m, 8.4m, 8.1m, 7.8m };
+    private const int MaxSummaryChars = 550;   // párrafo de 3 líneas
+    private const int MaxBulletChars = 240;    // 2 líneas
+    private const int MaxLineChars = 240;      // línea tipo "Lenguajes: ..."
+    private const int MaxFieldChars = 90;      // título, empresa, fechas, stack
+    private const int MaxBulletsDefault = 5;
 
-    public CvCompilerService(ILogger<CvCompilerService> logger)
+    /// <summary>
+    /// Niveles de ajuste. El primero no recorta nada y cada uno siguiente quita las secciones con
+    /// prioridad igual o superior a la indicada. Los cuatro primeros solo bajan el cuerpo de letra,
+    /// así que Idiomas no se sacrifica hasta 8.1pt. Después ya se quita contenido, y la experiencia
+    /// mantiene sus viñetas hasta el penúltimo nivel.
+    /// </summary>
+    private static readonly (decimal FontSize, int DropPriorityAtOrAbove, int MaxBullets, int ExperienceBullets)[] FitLadder =
+    {
+        (9.0m, 0, 0, 5),
+        (8.7m, 0, 0, 5),
+        (8.4m, 0, 0, 5),
+        (8.1m, 0, 0, 5),
+        (8.1m, 3, 0, 5),
+        (8.1m, 2, 4, 5),
+        (7.8m, 2, 3, 4)
+    };
+
+    public CvCompilerService(
+        ILogger<CvCompilerService> logger,
+        BotConfig config,
+        CandidateProfileProvider profile)
     {
         _logger = logger;
+        _config = config;
+        _profile = profile;
     }
 
     public async Task<string?> GeneratePdfAsync(JobOffer job, EvaluationResult eval, CancellationToken ct)
     {
-        var outputDir = Path.Combine(AppContext.BaseDirectory, "GeneratedCVs");
+        if (eval.Cv == null || eval.Cv.Sections.Count == 0)
+        {
+            _logger.LogError("No hay documento de CV que compilar para '{Title}'.", job.Title);
+            return null;
+        }
+
+        var outputDir = ResolveOutputDir();
         Directory.CreateDirectory(outputDir);
 
-        var cleanJob = SanitizeFileName(job.Title);
-        var cleanCompany = SanitizeFileName(job.Company);
-        var baseFileName = $"CV_{cleanJob}_Adrián_Espínola_Gumiel";
+        ApplyAnchors(eval.Cv, job);
+        CoalesceSections(eval.Cv);
+        OrderSections(eval.Cv);
 
+        var candidate = _config.Candidate;
+        var baseFileName = BuildFileName(job, candidate);
         var typstFile = Path.Combine(outputDir, $"{baseFileName}.typ");
         var pdfFile = Path.Combine(outputDir, $"{baseFileName}.pdf");
 
-        var summary = PrepareText(eval.TailoredSummary, MaxSummaryChars);
-        var bullets = (eval.TailoredExperience ?? new List<string>())
-            .Take(5) // Permitimos hasta 5 puntos para EPAM Neoris
-            .Select(b => PrepareText(b, MaxBulletChars))
-            .Where(b => !string.IsNullOrWhiteSpace(b))
-            .ToList();
+        // Los .typ de intentos anteriores se borran, solo vale el PDF final
+        foreach (var stale in Directory.EnumerateFiles(outputDir, $"{baseFileName}.*.pdf"))
+        {
+            TryDelete(stale);
+        }
 
         string? lastAttemptPdf = null;
 
-        for (var i = 0; i < FontSizeLadder.Length; i++)
+        for (var i = 0; i < FitLadder.Length; i++)
         {
-            var fontSize = FontSizeLadder[i];
-            var typstContent = BuildTypstContent(summary, bullets, fontSize);
+            var (fontSize, dropPriorityAtOrAbove, maxBullets, experienceBullets) = FitLadder[i];
 
-            await File.WriteAllTextAsync(typstFile, typstContent, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), ct);
+            var sections = ApplyTrim(eval.Cv.Sections, dropPriorityAtOrAbove, maxBullets, experienceBullets);
+            var typstContent = BuildTypstContent(eval.Cv, sections, fontSize);
 
-            var compiled = await CompileTypstAsync(typstFile, pdfFile, ct);
-            if (!compiled)
+            await File.WriteAllTextAsync(
+                typstFile,
+                typstContent,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                ct);
+
+            if (!await CompileTypstAsync(typstFile, pdfFile, ct))
             {
                 return null;
             }
@@ -60,25 +102,566 @@ public class CvCompilerService
 
             if (pageCount <= 1)
             {
+                if (i > 0)
+                {
+                    _logger.LogInformation(
+                        "CV ajustado en el intento {Attempt}/{Total}: {Size}pt, secciones con prioridad >= {Drop} eliminadas, máx. {Bullets} viñetas.",
+                        i + 1, FitLadder.Length, fontSize, dropPriorityAtOrAbove, maxBullets);
+                }
                 return pdfFile;
             }
 
             _logger.LogWarning(
-                "CV compilado con {Pages} páginas a {Size}pt (intento {Attempt}/{Total}); reajustando fuente.",
-                pageCount, fontSize, i + 1, FontSizeLadder.Length);
+                "CV compilado con {Pages} páginas (intento {Attempt}/{Total}: {Size}pt, recorte desde prioridad {Drop}); reajustando.",
+                pageCount, i + 1, FitLadder.Length, fontSize, dropPriorityAtOrAbove);
         }
 
-        return lastAttemptPdf;
+        _logger.LogError(
+            "El CV de '{Title}' no cabe en una sola página A4 ni con el recorte y cuerpo de letra mínimos. No se envía PDF.",
+            job.Title);
+
+        if (!string.IsNullOrEmpty(lastAttemptPdf)) TryDelete(lastAttemptPdf);
+        return null;
     }
 
-    private static string BuildTypstContent(string summary, List<string> bullets, decimal fontSize)
+    private string ResolveOutputDir()
     {
-        var experienceBullets = new StringBuilder();
-        foreach (var bullet in bullets)
+        var configured = _config.Candidate.OutputDir;
+        if (string.IsNullOrWhiteSpace(configured)) configured = "GeneratedCVs";
+        return Path.IsPathRooted(configured)
+            ? configured
+            : Path.Combine(AppContext.BaseDirectory, configured);
+    }
+
+    private string BuildFileName(JobOffer job, CandidateConfig candidate)
+    {
+        var template = string.IsNullOrWhiteSpace(candidate.PdfFileNameTemplate)
+            ? "CV_{job}_{name}"
+            : candidate.PdfFileNameTemplate;
+
+        var namePart = SanitizeFileName(candidate.FullName, 40);
+        var jobPart = SanitizeFileName(job.Title, 25);
+
+        return string.IsNullOrWhiteSpace(jobPart) || string.IsNullOrWhiteSpace(namePart)
+            ? $"CV_{Guid.NewGuid():N}"[..40]
+            : SanitizeFileName(template.Replace("{job}", jobPart).Replace("{name}", namePart), 90);
+    }
+
+    /// <summary>
+    /// Rellena el CV con los datos del bloque de anclas del perfil (empresa, fechas, stack, enlace
+    /// y descripción) para que no dependan de lo que conteste Gemini. Los proyectos que no estén
+    /// en el perfil se quitan. Si no hay anclas, el documento se deja como viene.
+    /// </summary>
+    private void ApplyAnchors(CvDocument cv, JobOffer job)
+    {
+        var anchors = _profile.Anchors;
+        if (anchors.IsEmpty) return;
+
+        cv.Sections ??= new List<CvSection>();
+
+        if (anchors.Experience.Count > 0)
         {
-            experienceBullets.AppendLine($"    [{bullet}],");
+            var experience = FindSection(cv.Sections, "experienc");
+            if (experience is null)
+            {
+                experience = new CvSection { Heading = "Experiencia Laboral", Kind = "entries", Priority = 1 };
+                cv.Sections.Insert(0, experience);
+                _logger.LogInformation("El modelo no devolvió sección de experiencia; se genera desde las anclas del perfil.");
+            }
+
+            MergeAnchored(experience, anchors.Experience, keepUnmatched: true, job, BulletLimit("experienc"));
         }
-        if (bullets.Count == 0) { experienceBullets.AppendLine("    [Desarrollo de microservicios backend con Minimal APIs, CQRS, Dapper y SQL Server durante el periodo de prácticas.],"); }
+
+        if (anchors.Projects.Count > 0)
+        {
+            var projects = FindSection(cv.Sections, "proyect");
+            if (projects is null)
+            {
+                projects = new CvSection { Heading = "Proyectos", Kind = "entries", Priority = 2 };
+                cv.Sections.Add(projects);
+                _logger.LogInformation("El modelo no devolvió sección de proyectos; se genera desde las anclas del perfil.");
+            }
+
+            MergeAnchored(projects, anchors.Projects, keepUnmatched: false, job, BulletLimit("proyect"));
+        }
+
+        MergeProfileSection(cv, "habilidad", anchors.Profile.Skills, "Habilidades Técnicas", 1);
+        MergeProfileSection(cv, "formaci", anchors.Profile.Education, "Formación Académica", 2);
+        MergeProfileSection(cv, "idioma", anchors.Profile.Languages, "Idiomas", 3);
+    }
+
+    /// <summary>
+    /// Asegura que habilidades, formación e idiomas estén aunque el modelo no los mencione. Si la
+    /// sección existe, solo se añaden las líneas cuya etiqueta falta; si no, se crea desde el perfil.
+    /// Es lo mismo que hace LocalCvBuilder, para que el CV sea igual de completo llegue de donde llegue.
+    /// </summary>
+    private void MergeProfileSection(CvDocument cv, string headingNeedle, List<CvAnchorLine> lines, string heading, int priority)
+    {
+        if (lines.Count == 0) return;
+
+        var existing = lines
+            .Where(l => !string.IsNullOrWhiteSpace(l.Label) && !string.IsNullOrWhiteSpace(l.Text))
+            .ToList();
+        if (existing.Count == 0) return;
+
+        cv.Sections ??= new List<CvSection>();
+
+        var section = FindTextSection(cv.Sections, headingNeedle);
+        if (section is null)
+        {
+            section = new CvSection { Heading = heading, Kind = CvSectionKinds.Texts, Priority = priority };
+            cv.Sections.Add(section);
+            _logger.LogInformation("El modelo no devolvió '{Heading}'; se genera desde las anclas del perfil.", heading);
+        }
+
+        section.Items ??= new List<CvItem>();
+        foreach (var line in existing)
+        {
+            if (section.Items.Any(i => TitlesMatch(i.Label, line.Label))) continue;
+            section.Items.Add(new CvItem { Label = line.Label, Text = line.Text });
+        }
+    }
+
+    /// <summary>Escoge cuántas viñetas lleva cada tipo de bloque.</summary>
+    private int BulletLimit(string headingNeedle)
+    {
+        var value = headingNeedle switch
+        {
+            "experienc" => _config.ExperienceBullets,
+            "proyect" => _config.ProjectBullets,
+            _ => 0
+        };
+
+        return value > 0 ? value : MaxBulletsDefault;
+    }
+
+    /// <summary>
+    /// El modelo a veces devuelve la misma sección repetida ("Experiencia Laboral" cuatro veces)
+    /// dejando las últimas sin contenido. Se queda con la primera y de las demás solo absorbe los
+    /// bloques que llevan algo escrito, porque si no el bloque vacío se cuela en la sección buena.
+    /// </summary>
+    private void CoalesceSections(CvDocument cv)
+    {
+        if (cv.Sections is null || cv.Sections.Count < 2) return;
+
+        var kept = new List<CvSection>();
+        var byHeading = new Dictionary<string, CvSection>(StringComparer.Ordinal);
+
+        foreach (var section in cv.Sections)
+        {
+            var key = CandidateProfileProvider.Normalize(section.Heading ?? string.Empty);
+            if (key.Length == 0) continue;
+
+            if (!byHeading.TryGetValue(key, out var target))
+            {
+                byHeading[key] = section;
+                kept.Add(section);
+                continue;
+            }
+
+            target.Items ??= new List<CvItem>();
+            var useful = section.Items?.Where(ItemHasContent).ToList() ?? [];
+            foreach (var item in useful)
+            {
+                if (!target.Items.Any(existing => SameBlock(existing, item))) target.Items.Add(item);
+            }
+
+            _logger.LogInformation(
+                "Sección repetida '{Heading}': fusionada en la anterior, {Used} bloques útiles y {Empty} vacíos descartados.",
+                section.Heading, useful.Count, (section.Items?.Count ?? 0) - useful.Count);
+        }
+
+        if (kept.Count != cv.Sections.Count) cv.Sections = kept;
+    }
+
+    /// <summary>
+    /// Un bloque sirve si tiene algo escrito además del título. Un item que solo lleva "Desarrollador
+    /// Backend" y nada más es el patrón que deja el modelo cuando repite la sección, así que no cuenta.
+    /// </summary>
+    private static bool ItemHasContent(CvItem item)
+    {
+        var written = new[] { item.Label, item.Text, item.Org, item.Dates, item.Stack, item.Url, item.UrlLabel }
+            .Any(value => !string.IsNullOrWhiteSpace(value));
+
+        return written || item.Bullets?.Any(b => !string.IsNullOrWhiteSpace(b)) == true;
+    }
+
+    /// <summary>Dos bloques son el mismo si dicen lo mismo del mismo sitio.</summary>
+    private static bool SameBlock(CvItem left, CvItem right) =>
+        TitlesMatch($"{left.Title} {left.Org}", $"{right.Title} {right.Org}");
+
+    /// <summary>
+    /// Fija el orden de las secciones. El modelo las devuelve en el orden que quiere, así que sin
+    /// esto un CV puede acabar con los idiomas arriba. La experiencia manda.
+    /// </summary>
+    private void OrderSections(CvDocument cv)
+    {
+        if (cv.Sections is null || cv.Sections.Count < 2) return;
+
+        var order = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["experienc"] = 0,
+            ["proyect"] = 1,
+            ["habilidad"] = 2,
+            ["tecnolog"] = 2,
+            ["conoc"] = 2,
+            ["formaci"] = 3,
+            ["estudi"] = 3,
+            ["titul"] = 3,
+            ["certific"] = 3,
+            ["idioma"] = 4,
+            ["lengua"] = 4
+        };
+
+        var before = cv.Sections.ToList();
+
+        cv.Sections = cv.Sections
+            .Select((section, index) => new { section, index, rank = RankOf(section, order) })
+            .OrderBy(x => x.rank)
+            .ThenBy(x => x.index)
+            .Select(x => x.section)
+            .ToList();
+
+        if (!before.SequenceEqual(cv.Sections))
+        {
+            _logger.LogInformation(
+                "Secciones reordenadas para tratar la experiencia primero: {Order}.",
+                string.Join(" > ", cv.Sections.Select(s => s.Heading)));
+        }
+    }
+
+    private static int RankOf(CvSection section, Dictionary<string, int> order)
+    {
+        var heading = CandidateProfileProvider.Normalize(section.Heading ?? string.Empty);
+
+        foreach (var (needle, rank) in order)
+        {
+            if (heading.Contains(needle, StringComparison.Ordinal)) return rank;
+        }
+
+        return 5;
+    }
+
+    /// <summary>Como FindSection pero para secciones de líneas, que no son kind = entries.</summary>
+    private static CvSection? FindTextSection(List<CvSection> sections, string headingNeedle)
+    {
+        foreach (var section in sections)
+        {
+            if (CvSectionKinds.Normalize(section.Kind) != CvSectionKinds.Texts) continue;
+
+            var heading = CandidateProfileProvider.Normalize(section.Heading ?? string.Empty);
+            if (heading.Contains(headingNeedle, StringComparison.Ordinal)) return section;
+        }
+
+        return null;
+    }
+
+    private static CvSection? FindSection(List<CvSection> sections, string headingNeedle)
+    {
+        foreach (var section in sections)
+        {
+            if (section.Kind is not null && !section.Kind.Equals("entries", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var heading = CandidateProfileProvider.Normalize(section.Heading ?? string.Empty);
+            if (heading.Contains(headingNeedle, StringComparison.Ordinal)) return section;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Deja la sección en el orden de las anclas. Si el modelo no trajo un bloque equivalente se
+    /// crea desde el ancla, así la experiencia y los proyectos del perfil salen siempre.
+    /// </summary>
+    private void MergeAnchored(CvSection section, List<CvAnchorEntry> anchors, bool keepUnmatched, JobOffer job, int bulletLimit)
+    {
+        var leftover = new List<CvItem>(section.Items ?? new List<CvItem>());
+        var merged = new List<CvItem>(anchors.Count);
+
+        foreach (var anchor in anchors)
+        {
+            // Solo se reutiliza el bloque del modelo si su título casa con el del perfil. Si no
+            // casa se crea uno nuevo desde el ancla, así no se arrastran las viñetas de otro
+            // proyecto a uno que no le corresponde
+            var index = leftover.FindIndex(i => TitlesMatch(i.Title, anchor.Title));
+            var item = index >= 0 ? leftover[index] : new CvItem();
+            if (index >= 0) leftover.RemoveAt(index);
+
+            item.Title = anchor.Title;
+            if (string.IsNullOrWhiteSpace(item.Org)) item.Org = anchor.Org;
+            if (string.IsNullOrWhiteSpace(item.Dates)) item.Dates = anchor.Dates;
+            if (string.IsNullOrWhiteSpace(item.Stack)) item.Stack = anchor.Stack;
+
+            if (string.IsNullOrWhiteSpace(item.Url) && !string.IsNullOrWhiteSpace(anchor.Url))
+            {
+                item.Url = anchor.Url;
+                item.UrlLabel = string.IsNullOrWhiteSpace(anchor.UrlLabel) ? item.UrlLabel : anchor.UrlLabel;
+            }
+
+            item.Bullets = BuildBullets(anchor, item, job, bulletLimit);
+            merged.Add(item);
+        }
+
+        if (keepUnmatched) merged.AddRange(leftover);
+
+        section.Items = merged;
+        _logger.LogInformation(
+            "Anclas aplicadas a '{Heading}': {Count} bloques ({Detail}).",
+            section.Heading, merged.Count,
+            string.Join(", ", merged.Select(i => $"{i.Title}: {(i.Bullets?.Count ?? 0)} viñetas, {(string.IsNullOrWhiteSpace(i.Url) ? "sin enlace" : "con enlace")}")));
+    }
+
+    /// <summary>
+    /// Viñetas de un bloque. Se queda con las que traiga el modelo y, si no llegan al número
+    /// pedido, las completa con los puntos del perfil. El fallback solo se usa si no queda ninguna.
+    /// </summary>
+    private List<string> BuildBullets(CvAnchorEntry anchor, CvItem item, JobOffer job, int limit)
+    {
+        var chosen = (item.Bullets ?? new List<string>())
+            .Where(b => !string.IsNullOrWhiteSpace(b))
+            .Select(b => b.Trim())
+            .ToList();
+
+        var pool = anchor.Points.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
+
+        foreach (var point in SelectPoints(pool, chosen, job, limit - chosen.Count))
+        {
+            chosen.Add(point);
+        }
+
+        if (chosen.Count == 0 && !string.IsNullOrWhiteSpace(anchor.Fallback))
+        {
+            chosen.Add(anchor.Fallback);
+        }
+
+        return chosen.Take(limit > 0 ? limit : chosen.Count).ToList();
+    }
+
+    /// <summary>
+    /// Elige del fondo de puntos los que mejor encajen con la oferta: puntúa cada uno por las
+    /// palabras que comparte con el título y la descripción y, a igualdad, se queda con el que va
+    /// antes en el perfil.
+    /// </summary>
+    private static List<string> SelectPoints(List<string> pool, List<string> alreadyChosen, JobOffer job, int needed)
+    {
+        if (needed <= 0 || pool.Count == 0) return new List<string>();
+
+        var offer = CandidateProfileProvider.Normalize($"{job.Title} {job.Description}");
+        var offerWords = SignificantWords(offer);
+
+        return pool
+            .Where(point => !alreadyChosen.Any(chosen => SaysSameThing(chosen, point)))
+            .Select((point, index) => new { point, index, score = OverlapScore(point, offerWords) })
+            .OrderByDescending(x => x.score)
+            .ThenBy(x => x.index)
+            .Take(needed)
+            .Select(x => x.point)
+            .ToList();
+    }
+
+    /// <summary>Número de palabras con contenido que comparten el punto y la oferta.</summary>
+    private static double OverlapScore(string point, HashSet<string> offerWords)
+    {
+        if (offerWords.Count == 0) return 0;
+
+        var matched = new HashSet<string>(
+            SignificantWords(CandidateProfileProvider.Normalize(point)).Where(offerWords.Contains),
+            StringComparer.Ordinal);
+
+        if (matched.Count == 0) return 0;
+
+        // Las palabras técnicas ("vertical", "informix", "cqrs") pesan más que las comunes ("cliente")
+        var weight = matched.Sum(word => word.Length >= 6 ? 1.5 : word.Length >= 4 ? 1.0 : 0.5);
+
+        // Rompe los empates hacia delante: lo que más cuenta en un bloque va arriba
+        return weight - point.Length / 10000.0;
+    }
+
+    /// <summary>Palabras sin valor para comparar: artículos, preposiciones y palabras de oferta.</summary>
+    private static HashSet<string> SignificantWords(string normalized) =>
+        Regex.Matches(normalized, "[a-z0-9+#]{3,}")
+            .Select(m => m.Value)
+            .Where(word => !NoiseWords.Contains(word))
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Si dos frases cuentan lo mismo: una está dentro de la otra o comparten casi todo el texto.
+    /// Sirve para no repetir lo que el modelo ya escribió.
+    /// </summary>
+    private static bool SaysSameThing(string left, string right)
+    {
+        var a = SignificantWords(CandidateProfileProvider.Normalize(left));
+        var b = SignificantWords(CandidateProfileProvider.Normalize(right));
+        if (a.Count == 0 || b.Count == 0) return false;
+
+        var (small, big) = a.Count <= b.Count ? (a, b) : (b, a);
+
+        // Con menos de 4 palabras con contenido puede ser casualidad, así que no se compara
+        if (small.Count < 4) return false;
+
+        if (small.All(big.Contains)) return true;
+
+        var shared = big.Intersect(small, StringComparer.Ordinal).Count();
+        return shared / (double)small.Count >= 0.6;
+    }
+
+    /// <summary>Palabras sin valor para comparar: artículos, preposiciones y jerga de oferta.</summary>
+    private static readonly HashSet<string> NoiseWords = new(StringComparer.Ordinal)
+    {
+        "and", "api", "app", "anos", "base", "buscamos", "caso", "cliente", "clientes", "como",
+        "con", "conocimiento", "datos", "de", "del", "desde", "dentro", "desarrollo", "donde",
+        "cada", "entre", "equipo", "este", "esta", "esto", "experiencia", "gente", "grupo",
+        "hacer", "hacia", "idea", "igual", "implementacion", "la", "las", "le", "los", "mas",
+        "mayor", "mediante", "mejor", "mercado", "mismo", "multinacional", "negocio", "nivel",
+        "nuestra", "nuestro", "oferta", "orden", "otro", "para", "pero", "persona", "poder", "por",
+        "porque", "primer", "proyecto", "propio", "puesto", "punto", "que", "real", "saber",
+        "salario", "sector", "sido", "sin", "sobre", "solo", "sistema", "sistemas", "trabajando",
+        "trabajo", "trafico", "ultimo", "usted", "valor", "valores", "varios", "vez", "yo"
+    };
+
+    /// <summary>
+    /// Compara títulos sin acentos, espacios ni signos. Deja que uno contenga al otro ("Nombre
+    /// (detalle)" casa con "Nombre"), pero pide cuatro caracteres mínimo para que palabras cortas
+    /// tipo "CV" no emparejen nada.
+    /// </summary>
+    private static bool TitlesMatch(string? left, string? right)
+    {
+        var a = MatchKey(left);
+        var b = MatchKey(right);
+
+        if (a.Length == 0 || b.Length == 0) return false;
+        if (a.Equals(b, StringComparison.Ordinal)) return true;
+
+        var shortest = Math.Min(a.Length, b.Length);
+        return shortest >= 4 &&
+               (a.Contains(b, StringComparison.Ordinal) || b.Contains(a, StringComparison.Ordinal));
+    }
+
+    private static string MatchKey(string? value) =>
+        new((value ?? string.Empty)
+            .Where(c => char.IsLetterOrDigit(c))
+            .Select(char.ToLowerInvariant)
+            .ToArray());
+
+    /// <summary>
+    /// Cuántas viñetas caben en un bloque. La experiencia es la última en recortarse y los
+    /// proyectos se quedan por debajo de su límite, así que al apretar sale antes información de
+    /// los proyectos que del trabajo.
+    /// </summary>
+    private int BulletLimitFor(CvSection section, int maxBullets, int experienceBullets)
+    {
+        var heading = CandidateProfileProvider.Normalize(section.Heading ?? string.Empty);
+
+        if (heading.Contains("experienc", StringComparison.Ordinal))
+        {
+            var limit = experienceBullets > 0 ? experienceBullets : _config.ExperienceBullets;
+            return maxBullets > 0 ? Math.Max(maxBullets, limit) : limit;
+        }
+
+        if (heading.Contains("proyect", StringComparison.Ordinal))
+        {
+            var limit = _config.ProjectBullets > 0 ? _config.ProjectBullets : 3;
+            return maxBullets > 0 ? Math.Min(maxBullets, limit) : limit;
+        }
+
+        return maxBullets > 0 ? maxBullets : MaxBulletsDefault;
+    }
+
+    private List<CvSection> ApplyTrim(List<CvSection> sections, int dropPriorityAtOrAbove, int maxBullets, int experienceBullets)
+    {
+        var result = new List<CvSection>();
+
+        foreach (var section in sections)
+        {
+            if (dropPriorityAtOrAbove > 0 && section.Priority >= dropPriorityAtOrAbove) continue;
+
+            var copy = new CvSection
+            {
+                Heading = section.Heading,
+                Priority = section.Priority,
+                Kind = section.Kind,
+                Items = new List<CvItem>()
+            };
+
+            var limit = BulletLimitFor(section, maxBullets, experienceBullets);
+
+            foreach (var item in section.Items)
+            {
+                var copyItem = new CvItem
+                {
+                    Label = item.Label,
+                    Text = item.Text,
+                    Title = item.Title,
+                    Org = item.Org,
+                    Dates = item.Dates,
+                    Stack = item.Stack,
+                    Url = item.Url,
+                    UrlLabel = item.UrlLabel,
+                    Bullets = item.Bullets is null ? null : new List<string>(item.Bullets)
+                };
+
+                if (copyItem.Bullets is { Count: > 0 })
+                {
+                    if (copyItem.Bullets.Count > limit)
+                    {
+                        copyItem.Bullets = copyItem.Bullets.Take(limit).ToList();
+                    }
+                }
+
+                copy.Items.Add(copyItem);
+            }
+
+            if (copy.Items.Count > 0) result.Add(copy);
+        }
+
+        return result;
+    }
+
+    private string BuildTypstContent(CvDocument doc, List<CvSection> sections, decimal fontSize)
+    {
+        var candidate = _config.Candidate;
+        var body = new StringBuilder();
+
+        // --- PERFIL PROFESIONAL ---
+        if (!string.IsNullOrWhiteSpace(doc.Summary))
+        {
+            body.AppendLine("    #section-heading(\"Perfil Profesional\")");
+            body.AppendLine("    #text(size: 1.02em)[" + PrepareText(doc.Summary, MaxSummaryChars) + "]");
+        }
+
+        // --- SECCIONES GENERADAS POR GEMINI ---
+        foreach (var section in sections)
+        {
+            body.AppendLine("    #section-heading(" + TypstString(PrepareText(section.Heading, MaxFieldChars)) + ")");
+
+            if (CvSectionKinds.Normalize(section.Kind) == CvSectionKinds.Entries)
+            {
+                foreach (var item in section.Items)
+                {
+                    body.AppendLine(BuildEntryBlock(item));
+                }
+            }
+            else
+            {
+                foreach (var item in section.Items)
+                {
+                    body.AppendLine(BuildTextBlock(item));
+                }
+            }
+
+            body.AppendLine("    #v(0.25em)");
+        }
+
+        // --- PIE DE PÁGINA (ciudad y disponibilidad vienen de la configuración) ---
+        var footer = BuildFooterNote(candidate);
+        if (!string.IsNullOrWhiteSpace(footer))
+        {
+            body.AppendLine("    #v(0.2em)");
+            body.AppendLine("    #text(size: 0.85em, style: \"italic\", fill: muted)[" + footer + "]");
+        }
+
+        var fontSizeText = fontSize.ToString("0.0", CultureInfo.InvariantCulture);
+
         return $$"""
             #set page(
               paper: "a4",
@@ -87,7 +670,7 @@ public class CvCompilerService
 
             #set text(
               font: ("Segoe UI", "Arial"),
-              size: {{fontSize.ToString("0.0", CultureInfo.InvariantCulture)}}pt,
+              size: {{fontSizeText}}pt,
               fill: rgb("#111827"),
               lang: "es"
             )
@@ -108,145 +691,142 @@ public class CvCompilerService
 
             // --- CABECERA ---
             #align(center)[
-              #text(19pt, weight: "bold", fill: primary)[ADRIÁN ESPÍNOLA GUMIEL] \
+              #text(19pt, weight: "bold", fill: primary)[{{EscapeTypst(candidate.FullName.ToUpperInvariant())}}] \
               #v(2pt)
-              #text(10.5pt, weight: "semibold", fill: accent)[Desarrollador Backend .NET / C\#] \
+              #text(10.5pt, weight: "semibold", fill: accent)[{{EscapeTypst(string.IsNullOrWhiteSpace(doc.Headline) ? candidate.Headline : doc.Headline)}}] \
               #v(3pt)
-              #text(8.5pt, fill: muted)[
-                691 77 96 27 #h(8pt) | #h(8pt)
-                #link("mailto:espinolagumieladrian@gmail.com")[espinolagumieladrian\@gmail.com] #h(8pt) | #h(8pt)
-                #link("https://github.com/idarkar3000")[github.com/idarkar3000] #h(8pt) | #h(8pt)
-                #link("https://linkedin.com/in/adrian-espinola-gumiel")[linkedin.com/in/adrian-espinola-gumiel]
-              ]
+              #text(8.5pt, fill: muted)[{{BuildContactLine(candidate)}}]
             ]
 
             #v(0.3em)
 
-            // --- SOBRE MÍ / PERFIL PROFESIONAL (ESPACIO AMPLIADO) ---
-            #section-heading("Perfil Profesional")
-            #text(size: 1.02em)[
-              {{summary}}
-            ]
-
-            // --- EXPERIENCIA LABORAL (EPAM NEORIS DESTACADA) ---
-            #section-heading("Experiencia Laboral")
-
-            #grid(
-              columns: (1fr, auto),
-              [
-                #text(weight: "bold", size: 1.06em, fill: primary)[Desarrollador Backend .NET (Prácticas)] #text(weight: "medium", fill: muted)[ — EPAM Neoris]
-              ],
-              [
-                #text(size: 0.95em, weight: "semibold", fill: muted)[Marzo 2026 – Junio 2026]
-              ]
-            )
-            #v(0.25em)
-            #list(
-              marker: [•],
-              body-indent: 0.6em,
-            {{experienceBullets}}
-            )
-
-            // --- PROYECTOS DESTACADOS EN .NET ---
-            #section-heading("Proyectos Destacados en .NET")
-
-            #block[
-              #grid(
-                columns: (1fr, auto),
-                [
-                  #text(weight: "bold", size: 1.02em, fill: primary)[RadarChollos] #text(size: 0.93em, fill: muted)[ — Bot de Monitorización y Alertas en Tiempo Real] \
-                  #v(-2pt)
-                  #text(size: 0.88em, style: "italic", fill: accent)[C\# .NET 9 | IHostedService | EF Core | SQLite | Docker | Telegram.Bot | Serilog | xUnit | FluentAssertions | Render]
-                ],
-                [
-                  #text(size: 0.9em)[#link("https://github.com/idarkar3000/RadarChollos")[github.com/.../RadarChollos]]
-                ]
-              )
-              #v(0.12em)
-              #list(
-                marker: [•],
-                body-indent: 0.6em,
-                [Diseñé un servicio en segundo plano con IHostedService que rastrea periódicamente ofertas y envía alertas inmediatas por Telegram, expuesto junto a un endpoint de salud en ASP.NET Core.],
-                [Implementé un motor de reglas configurable (EF Core + SQLite) con palabras clave, exclusiones, límites de precio y normalización de comercios como Amazon, PcComponentes o MediaMarkt.],
-                [Desarrollé comandos interactivos de Telegram (/add, /list, /delete) para gestionar filtros en caliente sin reiniciar el servicio, restringidos a un usuario verificado.],
-                [Empaqueté la app con Docker multi-stage, la desplegué en Render con keep-alive vía UptimeRobot y logging estructurado con Serilog; cubrí la lógica crítica con pruebas xUnit y FluentAssertions.]
-              )
-            ]
-
-            #v(0.25em)
-            #block[
-              #grid(
-                columns: (1fr, auto),
-                [
-                  #text(weight: "bold", size: 1.02em, fill: primary)[Pdf_Signer] #text(size: 0.93em, fill: muted)[ — Manipulación y Firma Digital de Documentos] \
-                  #v(-2pt)
-                  #text(size: 0.88em, style: "italic", fill: accent)[C\# .NET 10 | WPF | PdfiumViewer | PdfPig]
-                ],
-                [
-                  #text(size: 0.9em)[#link("https://github.com/idarkar3000/Pdf_Signer")[github.com/.../Pdf_Signer]]
-                ]
-              )
-              #v(0.12em)
-              #list(
-                marker: [•],
-                body-indent: 0.6em,
-                [Desarrollé una aplicación de escritorio nativa en WPF (.NET 10) con visor PDF interactivo: zoom, navegación de páginas y vista adaptable.],
-                [Implementé un lienzo de firma manuscrita con modo borrador y grosor configurable, con estampado dinámico para arrastrar, reescalar y posicionar en tiempo real.],
-                [Añadí Drag & Drop para abrir documentos y funcionalidad Deshacer/Rehacer (Ctrl+Z / Ctrl+Y) tanto en el dibujo de la firma como en su posicionamiento.],
-                [Garanticé una exportación final vectorizada que preserva la integridad del documento y la transparencia de la firma, combinando PdfiumViewer y PdfPig.]
-              )
-            ]
-
-            // --- HABILIDADES TÉCNICAS ---
-            #section-heading("Habilidades Técnicas")
-
-            #set list(marker: [•], body-indent: 0.5em)
-            #v(0.1em)
-
-            - #text(weight: "bold", fill: primary)[Lenguajes & Frameworks:] C\#, \.NET / \.NET Core (9 y 10), ASP\.NET Core (Web APIs, Minimal APIs), LINQ, Async/Await, WPF / XAML.
-            - #text(weight: "bold", fill: primary)[Arquitectura & Patrones:] Microservicios, Vertical Slice Architecture, CQRS, IHostedService / Background Services, Inyección de Dependencias, JWT, FluentValidation, Middlewares globales.
-            - #text(weight: "bold", fill: primary)[Bases de Datos & ORMs:] IBM Informix, SQL Server, SQLite, Entity Framework Core, Dapper, Mapster (MapsterConfig), Optimización de Consultas e Índices.
-            - #text(weight: "bold", fill: primary)[Testing & Calidad:] xUnit, FluentAssertions, Swagger / OpenAPI, Postman.
-            - #text(weight: "bold", fill: primary)[DevOps & Herramientas:] Docker (builds multi-stage), Azure DevOps (CI/CD, Kanban, Git Flow, Pull Requests), Git, GitHub, Render, UptimeRobot, Telegram.Bot SDK, Serilog.
-            - #text(weight: "bold", fill: primary)[Metodologías & Competencias:] Scrum / Ágil, integración con Angular, herramientas de IA asistida para desarrollo, trabajo en equipo técnico y aprendizaje continuo.
-
-            // --- FORMACIÓN ACADÉMICA E IDIOMAS ---
-            #grid(
-              columns: (1fr, 130pt),
-              gutter: 18pt,
-              [
-                #section-heading("Formación Académica")
-                #grid(
-                  columns: (1fr, auto),
-                  [
-                    #text(weight: "bold", fill: primary)[Ingeniería en Diseño y Desarrollo de Videojuegos] \
-                    #text(size: 0.94em, fill: muted)[Universidad Rey Juan Carlos (URJC)]
-                  ],
-                  [
-                    #text(size: 0.94em, fill: muted)[2022 – 2026]
-                  ]
-                )
-                #v(0.2em)
-                #grid(
-                  columns: (1fr, auto),
-                  [
-                    #text(weight: "bold", fill: primary)[Técnico Superior en Animación 3D, Juegos y E.I.] \
-                    #text(size: 0.94em, fill: muted)[Premio Extraordinario / Excelencia Académica]
-                  ],
-                  [
-                    #text(size: 0.94em, fill: muted)[2019 – 2021]
-                  ]
-                )
-              ],
-              [
-                #section-heading("Idiomas")
-                #v(0.1em)
-                - *Español:* Nativo
-                - *Inglés:* B2 (TOEIC 805 / 990)
-              ]
-            )
+            {{body.ToString().TrimEnd()}}
             """;
+    }
+
+    private static string BuildEntryBlock(CvItem item)
+    {
+        var title = PrepareText(item.Title, MaxFieldChars);
+        var org = PrepareText(item.Org, MaxFieldChars);
+        var dates = PrepareText(item.Dates, MaxFieldChars);
+        var stack = PrepareText(item.Stack, MaxFieldChars);
+
+        var heading = string.IsNullOrWhiteSpace(org)
+            ? "[" + title + "]"
+            : "[" + title + " #text(weight: \"medium\", size: 0.95em, fill: muted)[ \\u{2014} " + org + "]]";
+
+        var stackLine = string.IsNullOrWhiteSpace(stack)
+            ? string.Empty
+            : "\n    #v(-2pt)\n    #text(size: 0.88em, style: \"italic\", fill: accent)[" + stack + "]";
+
+        var rightContent = dates;
+        if (!string.IsNullOrWhiteSpace(item.Url))
+        {
+            var label = string.IsNullOrWhiteSpace(item.UrlLabel) ? "github.com" : PrepareText(item.UrlLabel, MaxFieldChars);
+            var url = item.Url.Replace("\\", string.Empty).Replace("\"", string.Empty);
+            var link = "#link(\"" + url + "\")[" + label + "]";
+            rightContent = string.IsNullOrWhiteSpace(rightContent) ? link : rightContent + " #linebreak() " + link;
+        }
+
+        var rightCell = "[" + rightContent + "]";
+        var hasRight = !string.IsNullOrWhiteSpace(rightContent);
+
+        var bullets = new StringBuilder();
+        if (item.Bullets is { Count: > 0 })
+        {
+            var prepared = item.Bullets
+                .Select(b => PrepareText(b, MaxBulletChars))
+                .Where(b => !string.IsNullOrWhiteSpace(b))
+                .ToList();
+
+            if (prepared.Count > 0)
+            {
+                bullets.Append("\n    #v(0.1em)\n    #list(marker: [\\u{2022}], body-indent: 0.6em");
+                foreach (var bullet in prepared)
+                {
+                    bullets.Append(",\n      [" + bullet + "]");
                 }
+                bullets.Append("\n    )");
+            }
+        }
+
+        var grid = hasRight
+            ? $"""
+                #grid(
+                    columns: (1fr, auto),
+                    [
+                      #text(weight: "bold", size: 1.06em, fill: primary){heading}
+                    ],
+                    [
+                      #text(size: 0.92em, weight: "semibold", fill: muted){rightCell}
+                    ]
+                  )
+                """
+            : $"""
+                #text(weight: "bold", size: 1.06em, fill: primary){heading}
+                """;
+
+        return $"""
+                #block[
+                  {grid}{stackLine}{bullets}
+                ]
+                """;
+    }
+
+    private static string BuildTextBlock(CvItem item)
+    {
+        var text = PrepareText(item.Text, MaxLineChars);
+        var label = PrepareText(item.Label, MaxFieldChars);
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            text = string.IsNullOrWhiteSpace(label) ? string.Empty : label;
+            label = string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+
+        var content = string.IsNullOrWhiteSpace(label)
+            ? "[" + text + "]"
+            : "[" + "*" + label + ":* " + text + "]";
+
+        return "    #list(marker: [\\u{2022}], body-indent: 0.5em, " + content + ")";
+    }
+
+    private string BuildContactLine(CandidateConfig candidate)
+    {
+        var parts = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(candidate.Phone))
+        {
+            parts.Add(EscapeTypst(candidate.Phone.Trim()));
+        }
+
+        if (!string.IsNullOrWhiteSpace(candidate.Email))
+        {
+            var email = EscapeTypst(candidate.Email.Trim());
+            parts.Add($"#link(\"mailto:{candidate.Email.Trim()}\")[{email}]");
+        }
+
+        foreach (var link in candidate.Links ?? new List<ContactLink>())
+        {
+            if (string.IsNullOrWhiteSpace(link.Url) || string.IsNullOrWhiteSpace(link.Label)) continue;
+            parts.Add($"#link(\"{link.Url.Trim()}\")[{EscapeTypst(link.Label.Trim())}]");
+        }
+
+        return string.Join(" #h(8pt) | #h(8pt) ", parts);
+    }
+
+    private static string BuildFooterNote(CandidateConfig candidate)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(candidate.City)) parts.Add(EscapeTypst(candidate.City.Trim()));
+        if (!string.IsNullOrWhiteSpace(candidate.Availability)) parts.Add(EscapeTypst(candidate.Availability.Trim()));
+        return string.Join(" \\u{00B7} ", parts);
+    }
+
+    /// <summary>Escapa el texto para poder escribirlo como cadena en Typst.</summary>
+    private static string TypstString(string value) => "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
 
     private async Task<bool> CompileTypstAsync(string typstFile, string pdfFile, CancellationToken ct)
     {
@@ -307,7 +887,7 @@ public class CvCompilerService
         if (string.IsNullOrWhiteSpace(text)) return string.Empty;
 
         var normalized = text
-            .Trim('[', ']', ' ', '"', '\r', '\n', '•', '-')
+            .Trim('[', ']', ' ', '"', '\r', '\n', '\u2022', '-')
             .Replace("\r\n", " ")
             .Replace("\n", " ")
             .Replace("\r", " ");
@@ -328,7 +908,7 @@ public class CvCompilerService
             cut = cut[..lastSpace];
         }
 
-        return cut.TrimEnd('.', ',', ';', ' ') + "…";
+        return cut.TrimEnd('.', ',', ';', ' ') + "\u2026";
     }
 
     private static string EscapeTypst(string text)
@@ -362,10 +942,25 @@ public class CvCompilerService
         return sb.ToString();
     }
 
-    private static string SanitizeFileName(string input)
+    private static string SanitizeFileName(string input, int maxLength)
     {
         var invalid = new string(Path.GetInvalidFileNameChars()) + " /\\:*?\"<>|.,&;";
-        var escaped = Regex.Replace(input, "[" + Regex.Escape(invalid) + "]+", "_");
-        return escaped.Trim('_').Length > 25 ? escaped.Trim('_')[..25] : escaped.Trim('_');
+        var escaped = Regex.Replace(input ?? string.Empty, "[" + Regex.Escape(invalid) + "]+", "_").Trim('_');
+        return escaped.Length > maxLength ? escaped[..maxLength].Trim('_') : escaped;
+    }
+
+    private void TryDelete(string path)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (IOException ex)
+        {
+            _logger.LogWarning(ex, "No se pudo borrar el PDF sobrante '{File}'.", Path.GetFileName(path));
+        }
     }
 }

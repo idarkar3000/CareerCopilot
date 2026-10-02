@@ -14,4 +14,16 @@
     <PackageReference Include="Telegram.Bot" Version="19.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      Fuente única de verdad del CV: se copia a la salida para que Gemini la lea en runtime.
+      El perfil no se sube al repo porque tiene datos personales, así que en Render llega como
+      secret file y lo apunta BotConfig:CandidateProfileFile. Con la condición, si el archivo no
+      está (build de Docker desde un repo sin perfil) la publicación no falla.
+    -->
+    <Content Include="prompts\profile.md"
+             Condition="Exists('prompts\profile.md')"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

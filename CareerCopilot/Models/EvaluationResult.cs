@@ -16,9 +16,15 @@ public class EvaluationResult
     [JsonPropertyName("concerns")]
     public List<string> Concerns { get; set; } = new();
 
-    [JsonPropertyName("tailoredSummary")]
-    public string TailoredSummary { get; set; } = string.Empty;
+    /// <summary>CV completo adaptado a la oferta. Nulo solo si el modelo no lo devolvió.</summary>
+    [JsonPropertyName("cv")]
+    public CvDocument? Cv { get; set; }
 
-    [JsonPropertyName("tailoredExperience")]
-    public List<string> TailoredExperience { get; set; } = new();
+    /// <summary>True si el CV se montó sin Gemini, por falta de cuota. No lleva score fiable.</summary>
+    [JsonPropertyName("isLocal")]
+    public bool IsLocal { get; set; }
+
+    /// <summary>Tecnologías verificables que el CV mencionó y que NO aparecen en el perfil. Solo para diagnóstico.</summary>
+    [JsonPropertyName("sanitizerViolations")]
+    public List<string> SanitizerViolations { get; set; } = new();
 }

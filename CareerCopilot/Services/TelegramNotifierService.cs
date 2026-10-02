@@ -16,14 +16,20 @@ public class TelegramNotifierService
     private readonly ILogger<TelegramNotifierService> _logger;
     private readonly GeminiScorerService _scorer;
     private readonly CvCompilerService _cvCompiler;
-    private readonly Func<string?, Task>? _triggerScanAction;
+    private readonly Func<IManualActions> _manualActions;
 
-    private bool _isReceiving = false;
+    private bool _isReceiving;
     private readonly object _lock = new();
 
     private int _consecutiveConflicts;
     private DateTime? _firstConflictAt;
     private static readonly TimeSpan ConflictEscalationWindow = TimeSpan.FromSeconds(90);
+
+    /// <summary>Tiempo máximo que se deja correr un escaneo lanzado a mano desde el chat.</summary>
+    private static readonly TimeSpan ManualScanTimeout = TimeSpan.FromMinutes(15);
+
+    /// <summary>Separa el título de la descripción en "/cvlocal Título || Descripción".</summary>
+    private const string TitleDescriptionSeparator = "||";
 
     public TelegramNotifierService(
         BotConfig config,
@@ -31,30 +37,25 @@ public class TelegramNotifierService
         ILogger<TelegramNotifierService> logger,
         GeminiScorerService scorer,
         CvCompilerService cvCompiler,
-        Func<string?, Task>? triggerScanAction = null)
+        Func<IManualActions> manualActions)
     {
         _config = config;
         _db = db;
         _logger = logger;
         _scorer = scorer;
         _cvCompiler = cvCompiler;
-        _triggerScanAction = triggerScanAction;
+        _manualActions = manualActions;
         _botClient = new TelegramBotClient(_config.TelegramBotToken);
     }
 
-    /// <summary>
-    /// Antes se llamaba StartReceiving (síncrono). Ahora es async porque primero
-    /// verifica/borra un posible webhook residual antes de arrancar el long polling.
-    /// Actualiza el punto de llamada (Worker.cs / Program.cs) a:
-    ///   await telegramNotifier.StartReceivingAsync(ct);
-    /// </summary>
+    /// <summary>Empieza el long polling. Borra antes el webhook si quedó puesto.</summary>
     public async Task StartReceivingAsync(CancellationToken ct)
     {
         lock (_lock)
         {
             if (_isReceiving)
             {
-                _logger.LogWarning("StartReceiving invocado, pero el bot ya está recibiendo actualizaciones. Ignorando llamada duplicada.");
+                _logger.LogWarning("StartReceivingAsync invocado, pero el bot ya recibe actualizaciones. Se ignora la llamada duplicada.");
                 return;
             }
             _isReceiving = true;
@@ -89,6 +90,7 @@ public class TelegramNotifierService
         if (update.Message is not { Text: { } messageText } message) return;
         if (message.Chat.Id != _config.TelegramChatId) return;
 
+        var chatId = message.Chat.Id;
         var parts = messageText.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
         var command = parts[0].ToLowerInvariant();
         if (command.Contains('@')) command = command.Split('@')[0];
@@ -97,88 +99,46 @@ public class TelegramNotifierService
         switch (command)
         {
             case "/test":
-                await bot.SendTextMessageAsync(message.Chat.Id, "🧪 Iniciando prueba: Gemini API + Typst + PDF...", cancellationToken: ct);
-
-                var mockJob = new JobOffer(
-                    "mock_" + Guid.NewGuid().ToString("N")[..6],
-                    "Junior .NET Backend Developer",
-                    "Empresa de Prueba Tech",
-                    "https://es.linkedin.com/jobs/view/4155609388",
-                    "Buscamos desarrollador Junior .NET C# con conocimientos en ASP.NET Core, Entity Framework y SQL Server en Madrid.",
-                    DateTime.UtcNow,
-                    "Madrid",
-                    "Madrid",
-                    false
-                );
-
-                var eval = await _scorer.EvaluateAsync(mockJob, ct);
-                if (eval == null)
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "❌ Error en el test: Gemini devolvió nulo. Revisa la API Key, cuota o logs.", cancellationToken: ct);
-                    return;
-                }
-
-                var pdf = await _cvCompiler.GeneratePdfAsync(mockJob, eval, ct);
-                if (string.IsNullOrEmpty(pdf) || !System.IO.File.Exists(pdf))
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Gemini evaluó correctamente, pero falló la compilación del PDF en Typst. Revisa que Typst esté instalado y la plantilla .typ.", cancellationToken: ct);
-                    return;
-                }
-
-                // Enviar la tarjeta de la oferta y el documento adjunto
-                await SendNotificationAsync(mockJob, eval, pdf, ct);
-
-                // Mensaje explícito de éxito
-                await bot.SendTextMessageAsync(message.Chat.Id, "✅ ¡Test completado con éxito! Todo el pipeline (Gemini + Typst + Telegram) funciona correctamente.", cancellationToken: ct);
+                await HandleTestAsync(bot, chatId, ct);
                 break;
 
             case "/run":
-                await bot.SendTextMessageAsync(message.Chat.Id, "🚀 Disparando ciclo completo de búsqueda y análisis...", cancellationToken: ct);
-                if (_triggerScanAction != null)
-                {
-                    _ = Task.Run(async () => await _triggerScanAction(null), ct);
-                }
-                else
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "ℹ️ Acción de rastreo inmediato en segundo plano.", cancellationToken: ct);
-                }
+                await HandleRunAsync(bot, chatId, ct);
                 break;
 
             case "/scan":
-                if (string.IsNullOrWhiteSpace(argument))
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/scan <término>`\nEjemplo: `/scan wpf developer`", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                    return;
-                }
-                await bot.SendTextMessageAsync(message.Chat.Id, $"🔎 Escaneando vacantes para: *{EscapeMarkdown(argument)}*...", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                if (_triggerScanAction != null)
-                {
-                    _ = Task.Run(async () => await _triggerScanAction(argument), ct);
-                }
+                await HandleScanAsync(bot, chatId, argument, ct);
+                break;
+
+            case "/cv":
+                await HandleCvAsync(bot, chatId, argument, false, ct);
+                break;
+
+            case "/cvlocal":
+                await HandleCvAsync(bot, chatId, argument, true, ct);
+                break;
+
+            case "/unmark":
+                await HandleUnmarkAsync(bot, chatId, argument, ct);
+                break;
+
+            case "/stats":
+                await HandleStatsAsync(bot, chatId);
                 break;
 
             case "/addjob":
-                if (string.IsNullOrWhiteSpace(argument))
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/addjob <término>`\nEjemplo: `/addjob c# junior`", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                    return;
-                }
+                if (await RequireArgument(bot, chatId, argument, "/addjob &lt;término&gt;", "c# junior", ct)) return;
                 _db.AddSearchQuery(argument);
-                await bot.SendTextMessageAsync(message.Chat.Id, $"✅ Añadido a las búsquedas: *{EscapeMarkdown(argument)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                await SendHtmlAsync(bot, chatId, $"✅ Añadido a las búsquedas: <code>{Html(argument)}</code>", ct);
                 break;
 
             case "/removejob":
             case "/deljob":
-                if (string.IsNullOrWhiteSpace(argument))
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/removejob <término>`\nEjemplo: `/removejob c# junior`", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                    return;
-                }
+                if (await RequireArgument(bot, chatId, argument, "/removejob &lt;término&gt;", "c# junior", ct)) return;
                 var deleted = _db.RemoveSearchQuery(argument);
-                var reply = deleted
-                    ? $"🗑️ Eliminado de las búsquedas: *{EscapeMarkdown(argument)}*"
-                    : $"⚠️ No se encontró: *{EscapeMarkdown(argument)}*";
-                await bot.SendTextMessageAsync(message.Chat.Id, reply, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                await SendHtmlAsync(bot, chatId, deleted
+                    ? $"🗑️ Eliminado de las búsquedas: <code>{Html(argument)}</code>"
+                    : $"⚠️ No se encontró: <code>{Html(argument)}</code>", ct);
                 break;
 
             case "/listjobs":
@@ -186,138 +146,367 @@ public class TelegramNotifierService
                 var queries = _db.GetSearchQueries();
                 if (queries.Count == 0)
                 {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "📭 No hay términos de búsqueda activos.", cancellationToken: ct);
+                    await SendAsync(bot, chatId, "📭 No hay términos de búsqueda activos.", ct);
                     return;
                 }
-                var listText = "📋 *Términos de búsqueda activos:*\n" + string.Join("\n", queries.Select(q => $"• `{EscapeMarkdown(q)}`"));
-                await bot.SendTextMessageAsync(message.Chat.Id, listText, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                var listText = "📋 <b>Términos de búsqueda activos:</b>\n" +
+                               string.Join("\n", queries.Select(q => $"• <code>{Html(q)}</code>"));
+                await SendHtmlAsync(bot, chatId, listText, ct);
                 break;
 
             case "/addrequired":
-                if (string.IsNullOrWhiteSpace(argument))
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/addrequired <palabra>`\nEjemplo: `/addrequired .net`", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                    return;
-                }
+                if (await RequireArgument(bot, chatId, argument, "/addrequired &lt;palabra&gt;", ".net", ct)) return;
                 var reqKey = argument.ToLowerInvariant();
-                if (!_config.RequiredKeywords.Contains(reqKey))
-                {
-                    _config.RequiredKeywords.Add(reqKey);
-                    await bot.SendTextMessageAsync(message.Chat.Id, $"🔒 Palabra requerida añadida: *{EscapeMarkdown(reqKey)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                }
-                else
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, $"ℹ️ *{EscapeMarkdown(reqKey)}* ya estaba en la lista de requeridas.", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                }
+                var alreadyRequired = _config.RequiredKeywords.Contains(reqKey);
+                if (!alreadyRequired) _config.RequiredKeywords.Add(reqKey);
+                await SendHtmlAsync(bot, chatId, !alreadyRequired
+                    ? $"🔒 Palabra requerida añadida: <code>{Html(reqKey)}</code>"
+                    : $"ℹ️ <code>{Html(reqKey)}</code> ya estaba en la lista de requeridas.", ct);
                 break;
 
             case "/removerequired":
-                if (string.IsNullOrWhiteSpace(argument))
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/removerequired <palabra>`", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                    return;
-                }
+                if (await RequireArgument(bot, chatId, argument, "/removerequired &lt;palabra&gt;", null, ct)) return;
                 var remReq = argument.ToLowerInvariant();
                 var reqRemoved = _config.RequiredKeywords.Remove(remReq);
-                await bot.SendTextMessageAsync(message.Chat.Id, reqRemoved
-                    ? $"🔓 Palabra requerida retirada: *{EscapeMarkdown(remReq)}*"
-                    : $"⚠️ No se encontró: *{EscapeMarkdown(remReq)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                await SendHtmlAsync(bot, chatId, reqRemoved
+                    ? $"🔓 Palabra requerida retirada: <code>{Html(remReq)}</code>"
+                    : $"⚠️ No se encontró: <code>{Html(remReq)}</code>", ct);
                 break;
 
             case "/addexcluded":
-                if (string.IsNullOrWhiteSpace(argument))
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/addexcluded <palabra>`\nEjemplo: `/addexcluded senior`", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                    return;
-                }
+                if (await RequireArgument(bot, chatId, argument, "/addexcluded &lt;palabra&gt;", "senior", ct)) return;
                 var excKey = argument.ToLowerInvariant();
-                if (!_config.ExcludedKeywords.Contains(excKey))
-                {
-                    _config.ExcludedKeywords.Add(excKey);
-                    await bot.SendTextMessageAsync(message.Chat.Id, $"🚫 Palabra de exclusión añadida: *{EscapeMarkdown(excKey)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                }
-                else
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, $"ℹ️ *{EscapeMarkdown(excKey)}* ya estaba en la lista de exclusiones.", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                }
+                var alreadyExcluded = _config.ExcludedKeywords.Contains(excKey);
+                if (!alreadyExcluded) _config.ExcludedKeywords.Add(excKey);
+                await SendHtmlAsync(bot, chatId, !alreadyExcluded
+                    ? $"🚫 Palabra de exclusión añadida: <code>{Html(excKey)}</code>"
+                    : $"ℹ️ <code>{Html(excKey)}</code> ya estaba en la lista de exclusiones.", ct);
                 break;
 
             case "/removeexcluded":
-                if (string.IsNullOrWhiteSpace(argument))
-                {
-                    await bot.SendTextMessageAsync(message.Chat.Id, "⚠️ Uso: `/removeexcluded <palabra>`", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                    return;
-                }
+                if (await RequireArgument(bot, chatId, argument, "/removeexcluded &lt;palabra&gt;", null, ct)) return;
                 var remExc = argument.ToLowerInvariant();
                 var excRemoved = _config.ExcludedKeywords.Remove(remExc);
-                await bot.SendTextMessageAsync(message.Chat.Id, excRemoved
-                    ? $"✅ Palabra de exclusión eliminada: *{EscapeMarkdown(remExc)}*"
-                    : $"⚠️ No se encontró: *{EscapeMarkdown(remExc)}*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                await SendHtmlAsync(bot, chatId, excRemoved
+                    ? $"✅ Palabra de exclusión eliminada: <code>{Html(remExc)}</code>"
+                    : $"⚠️ No se encontró: <code>{Html(remExc)}</code>", ct);
                 break;
 
             case "/filters":
-                var reqs = _config.RequiredKeywords.Any() ? string.Join(", ", _config.RequiredKeywords.Select(r => $"`{EscapeMarkdown(r)}`")) : "_Ninguna_";
-                var excs = _config.ExcludedKeywords.Any() ? string.Join(", ", _config.ExcludedKeywords.Select(e => $"`{EscapeMarkdown(e)}`")) : "_Ninguna_";
-                var filterMsg = $"⚙️ *Filtros de Palabras Clave:*\n\n🔒 *Obligatorias:* {reqs}\n🚫 *Excluidas:* {excs}";
-                await bot.SendTextMessageAsync(message.Chat.Id, filterMsg, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                var reqs = _config.RequiredKeywords.Count > 0
+                    ? string.Join(", ", _config.RequiredKeywords.Select(r => $"<code>{Html(r)}</code>"))
+                    : "<i>Ninguna</i>";
+                var excs = _config.ExcludedKeywords.Count > 0
+                    ? string.Join(", ", _config.ExcludedKeywords.Select(e => $"<code>{Html(e)}</code>"))
+                    : "<i>Ninguna</i>";
+                var accepted = _config.LocationFilter.AcceptedLocations;
+                var locations = accepted.Count > 0
+                    ? string.Join(", ", accepted.Select(l => $"<code>{Html(l)}</code>"))
+                    : "<i>cualquiera</i>";
+                await SendHtmlAsync(bot, chatId,
+                    "⚙️ <b>Filtros activos</b>\n\n" +
+                    $"🔒 <b>Obligatorias:</b> {reqs}\n" +
+                    $"🚫 <b>Excluidas:</b> {excs}\n" +
+                    $"📍 <b>Ubicaciones:</b> {locations} (o remoto)", ct);
                 break;
 
             case "/threshold":
-                if (int.TryParse(argument, out var score) && score >= 0 && score <= 100)
+                if (int.TryParse(argument, out var score) && score is >= 0 and <= 100)
                 {
                     _config.MinScoreThreshold = score;
-                    await bot.SendTextMessageAsync(message.Chat.Id, $"🎯 Umbral mínimo de afinidad actualizado a: *{score}/100*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    await SendHtmlAsync(bot, chatId, $"🎯 Umbral mínimo de afinidad actualizado a: <b>{score}/100</b>", ct);
                 }
                 else
                 {
-                    await bot.SendTextMessageAsync(message.Chat.Id, $"⚠️ Introduce un valor entero de 0 a 100.\nUmbral actual: *{_config.MinScoreThreshold}/100*", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    await SendHtmlAsync(bot, chatId,
+                        $"⚠️ Introduce un valor entero de 0 a 100.\nUmbral actual: <b>{_config.MinScoreThreshold}/100</b>", ct);
                 }
                 break;
 
             case "/status":
                 var activeQueries = _db.GetSearchQueries();
-                var statusMsg =
-                    $"📊 *Estado del Bot:*\n\n" +
-                    $"• *Búsquedas activas:* {activeQueries.Count}\n" +
-                    $"• *Keywords obligatorias:* {_config.RequiredKeywords.Count}\n" +
-                    $"• *Keywords excluidas:* {_config.ExcludedKeywords.Count}\n" +
-                    $"• *Umbral Gemini:* {_config.MinScoreThreshold}/100\n" +
-                    $"• *Intervalo:* cada {_config.CheckIntervalMinutes} min";
-                await bot.SendTextMessageAsync(message.Chat.Id, statusMsg, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                var manual = ResolveManual();
+                await SendHtmlAsync(bot, chatId,
+                    "📊 <b>Estado del bot</b>\n\n" +
+                    $"• <b>Búsquedas activas:</b> {activeQueries.Count}\n" +
+                    $"• <b>Keywords obligatorias:</b> {_config.RequiredKeywords.Count}\n" +
+                    $"• <b>Keywords excluidas:</b> {_config.ExcludedKeywords.Count}\n" +
+                    $"• <b>Umbral Gemini:</b> {_config.MinScoreThreshold}/100\n" +
+                    $"• <b>Intervalo:</b> cada {_config.CheckIntervalMinutes} min\n" +
+                    $"• <b>Escaneo en curso:</b> {(manual.IsBusy ? Html(manual.BusyOrigin) : "ninguno")}", ct);
                 break;
 
             case "/help":
             case "/start":
-                var helpText = @"🤖 *Panel de Control - CareerCopilot*
-
-*Operativa de Búsqueda:*
-• `/run` — Disparar rastreo completo inmediatamente.
-• `/scan <término>` — Buscar ofertas puntuales sin añadirlas a la lista recurrente.
-• `/test` — Probar pipeline con Gemini y Typst compilando un CV ficticio.
-
-*Gestión de Búsquedas:*
-• `/addjob <término>` — Añadir término de búsqueda recurrente.
-• `/removejob <término>` — Eliminar término de búsqueda recurrente.
-• `/listjobs` — Listar todos los términos de búsqueda activos.
-
-*Filtros y Puntuación:*
-• `/addrequired <palabra>` — Añadir palabra técnica obligatoria (.net, c#).
-• `/removerequired <palabra>` — Quitar palabra obligatoria.
-• `/addexcluded <palabra>` — Añadir palabra a descartar (senior, lead).
-• `/removeexcluded <palabra>` — Quitar palabra de descarte.
-• `/filters` — Ver las palabras obligatorias y excluidas activas.
-• `/threshold <0-100>` — Modificar corte de afinidad para generar CV.
-
-*General:*
-• `/status` — Resumen general de métricas y filtros.
-• `/help` — Mostrar esta ayuda.";
-                await bot.SendTextMessageAsync(message.Chat.Id, helpText, parseMode: ParseMode.Markdown, cancellationToken: ct);
+                await SendHtmlAsync(bot, chatId, BuildHelpText(), ct);
                 break;
 
             default:
-                await bot.SendTextMessageAsync(message.Chat.Id, "❓ Comando no reconocido. Usa `/help` para ver la lista de comandos disponibles.", parseMode: ParseMode.Markdown, cancellationToken: ct);
+                await SendHtmlAsync(bot, chatId,
+                    "❓ Comando no reconocido. Usa <code>/help</code> para ver la lista de comandos.", ct);
                 break;
         }
+    }
+
+    private IManualActions ResolveManual()
+    {
+        try
+        {
+            return _manualActions();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "No se pudo resolver el pipeline manual.");
+            return NullManualActions.Instance;
+        }
+    }
+
+    private async Task HandleTestAsync(ITelegramBotClient bot, long chatId, CancellationToken ct)
+    {
+        await SendAsync(bot, chatId, "🧪 Iniciando prueba: Gemini API + Typst + PDF...", ct);
+
+        var mockJob = new JobOffer(
+            "mock_" + Guid.NewGuid().ToString("N")[..6],
+            "Junior .NET Backend Developer",
+            "Empresa de Prueba Tech",
+            "https://es.linkedin.com/jobs/view/4155609388",
+            "Buscamos desarrollador Junior .NET C# con conocimientos en ASP.NET Core, Entity Framework y SQL Server en Madrid.",
+            DateTime.UtcNow,
+            "Madrid",
+            "Madrid",
+            false);
+
+        var eval = await _scorer.EvaluateAsync(mockJob, ct);
+        if (eval == null)
+        {
+            await SendAsync(bot, chatId, "❌ Error en el test: Gemini devolvió nulo. Revisa la API Key, la cuota o los logs.", ct);
+            return;
+        }
+
+        var pdf = await _cvCompiler.GeneratePdfAsync(mockJob, eval, ct);
+        if (string.IsNullOrEmpty(pdf))
+        {
+            await SendHtmlAsync(bot, chatId,
+                "⚠️ Gemini evaluó correctamente, pero el CV no compiló a una sola página. Revisa que <b>typst</b> esté en el PATH.",
+                ct);
+            return;
+        }
+
+        await SendNotificationAsync(mockJob, eval, pdf, ct);
+
+        var sanitizerNote = eval.SanitizerViolations.Count > 0
+            ? $"\n⚠️ Guardarraíl: {eval.SanitizerViolations.Count} token(es) sin respaldo en tu perfil fueron descartados."
+            : "\n🛡️ Guardarraíl: ningún token sin respaldo en el CV.";
+
+        await SendHtmlAsync(bot, chatId,
+            $"✅ <b>Test completado</b>: Gemini ({eval.Score}/100) + Typst + Telegram funcionan.{sanitizerNote}", ct);
+    }
+
+    private async Task HandleRunAsync(ITelegramBotClient bot, long chatId, CancellationToken ct)
+    {
+        var manual = ResolveManual();
+        if (manual.IsBusy)
+        {
+            await SendHtmlAsync(bot, chatId,
+                $"⏳ Ya hay un escaneo en marcha (<b>{Html(manual.BusyOrigin)}</b>). Espera a que termine antes de lanzar otro.", ct);
+            return;
+        }
+
+        await SendAsync(bot, chatId, "🚀 Disparando ciclo completo de búsqueda y análisis en segundo plano...", ct);
+        _ = RunInBackgroundAsync(chatId, query: null);
+    }
+
+    private async Task HandleScanAsync(ITelegramBotClient bot, long chatId, string argument, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(argument))
+        {
+            await RequireArgument(bot, chatId, argument, "/scan &lt;término&gt;", "wpf developer", ct);
+            return;
+        }
+
+        var manual = ResolveManual();
+        if (manual.IsBusy)
+        {
+            await SendHtmlAsync(bot, chatId,
+                $"⏳ Ya hay un escaneo en marcha (<b>{Html(manual.BusyOrigin)}</b>). Espera a que termine antes de lanzar otro.", ct);
+            return;
+        }
+
+        await SendHtmlAsync(bot, chatId, $"🔎 Escaneando vacantes para: <b>{Html(argument)}</b>...", ct);
+        _ = RunInBackgroundAsync(chatId, argument);
+    }
+
+    /// <summary>Dispara el escaneo en segundo plano y avisa cuando acaba.</summary>
+    private async Task RunInBackgroundAsync(long chatId, string? query)
+    {
+        var manual = ResolveManual();
+        using var timeoutCts = new CancellationTokenSource(ManualScanTimeout);
+
+        try
+        {
+            var ok = string.IsNullOrWhiteSpace(query)
+                ? await manual.RunPipelineAsync(timeoutCts.Token)
+                : await manual.RunAdHocScanAsync(query, timeoutCts.Token);
+
+            if (!ok)
+            {
+                await SendHtmlAsync(_botClient, chatId,
+                    $"⚠️ El escaneo no se ejecutó: ya había otro en marcha (<b>{Html(manual.BusyOrigin)}</b>).");
+                return;
+            }
+
+            var what = string.IsNullOrWhiteSpace(query) ? "ciclo completo" : $"escaneo de <b>{Html(query)}</b>";
+            var stats = _db.GetStats(_config.MinScoreThreshold);
+            await SendHtmlAsync(_botClient, chatId,
+                $"✅ Fin del {what}.\nOfertas registradas: <b>{stats.Total}</b> · por encima del umbral: <b>{stats.Matches}</b> · media: <b>{stats.AverageScore}</b>/100.");
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("El escaneo disparado manualmente (/run o /scan) se canceló por timeout o apagado de la app.");
+            await SendHtmlAsync(_botClient, chatId, "⏱️ El escaneo manual se canceló por timeout (15 min). Revisa los logs.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando el escaneo disparado manualmente (/run o /scan).");
+            await SendHtmlAsync(_botClient, chatId, "❌ Error ejecutando el escaneo. Revisa los logs.");
+        }
+    }
+
+    /// <summary>Regenera el CV de una oferta. forceLocal equivale a escribir "local" detrás del argumento.</summary>
+    private async Task HandleCvAsync(ITelegramBotClient bot, long chatId, string argument, bool forceLocal, CancellationToken ct)
+    {
+        if (await RequireArgument(bot, chatId, argument, "/cv &lt;id | parte del título | empresa | url&gt; [local]", "li_4155609388", ct)) return;
+
+        // "local" al final fuerza el CV sin Gemini, para cuando no queda cuota
+        var localOnly = forceLocal;
+        var query = argument;
+        if (!localOnly && query.TrimEnd().EndsWith(" local", StringComparison.OrdinalIgnoreCase))
+        {
+            localOnly = true;
+            query = query.TrimEnd()[..^" local".Length].Trim();
+        }
+
+        // "/cvlocal Titulo || Descripcion" para una oferta que pegues tú y no esté registrada
+        if (query.Contains(TitleDescriptionSeparator, StringComparison.Ordinal))
+        {
+            await GenerateFromPastedOfferAsync(bot, chatId, query, ct);
+            return;
+        }
+
+        if (query.Length == 0)
+        {
+            await SendHtmlAsync(bot, chatId, "⚠️ Falta la oferta. Uso: <code>/cv &lt;id&gt;</code> o <code>/cv &lt;id&gt; local</code>.", ct);
+            return;
+        }
+
+        var offer = _db.FindProcessedOffer(query, out var previousScore);
+        if (offer == null)
+        {
+            await SendHtmlAsync(bot, chatId,
+                $"🔍 No encuentro ninguna oferta registrada que coincida con <code>{Html(query)}</code>. " +
+                "Prueba con el identificador de la oferta, usa <code>/stats</code>, o pégala directamente: " +
+                "<code>/cvlocal Título || descripción</code>.", ct);
+            return;
+        }
+
+        await SendHtmlAsync(bot, chatId,
+            localOnly
+                ? $"📄 Generando el CV local de <b>{Html(offer.Title)}</b> (sin Gemini)...\n<i>{Html(offer.Company)}</i>"
+                : $"📄 Regenerando el CV para <b>{Html(offer.Title)}</b> (registrada con {previousScore}/100)...\n<i>{Html(offer.Company)}</i>", ct);
+
+        var result = await ResolveManual().RegenerateCvAsync(offer, ct, localOnly);
+
+        await SendHtmlAsync(bot, chatId, result.Message, ct);
+
+        if (result.Ok && !string.IsNullOrEmpty(result.PdfPath) && System.IO.File.Exists(result.PdfPath))
+        {
+            var caption = result.IsLocal
+                ? $"📄 CV para {offer.Title} (generado sin IA)."
+                : $"📄 CV adaptado para {offer.Title} ({result.Score}/100).";
+            await SendDocumentSafeAsync(chatId, result.PdfPath, caption);
+        }
+    }
+
+    /// <summary>
+    /// Genera el CV de una oferta que el usuario pega, para cuando no hay cuota y la oferta nunca
+    /// llegó a registrarse. Se usa como título y descripción de la oferta, sin tocar la base.
+    /// </summary>
+    private async Task GenerateFromPastedOfferAsync(ITelegramBotClient bot, long chatId, string argument, CancellationToken ct)
+    {
+        var parts = argument.Split(TitleDescriptionSeparator, 2, StringSplitOptions.TrimEntries);
+        var title = parts[0];
+        var description = parts.Length > 1 ? parts[1] : string.Empty;
+
+        if (title.Length == 0 || description.Length == 0)
+        {
+            await SendHtmlAsync(bot, chatId,
+                "⚠️ Formato: <code>/cvlocal Título de la oferta || Descripción completa de la oferta</code>.", ct);
+            return;
+        }
+
+        var offer = new JobOffer(
+            Guid.NewGuid().ToString("N")[..12], title, "", "", description,
+            DateTime.UtcNow, "", "", false);
+
+        await SendHtmlAsync(bot, chatId, $"📄 Generando el CV local de <b>{Html(title)}</b> (sin Gemini)...", ct);
+
+        var result = await ResolveManual().RegenerateCvAsync(offer, ct, localOnly: true);
+
+        await SendHtmlAsync(bot, chatId, result.Message, ct);
+
+        if (result.Ok && !string.IsNullOrEmpty(result.PdfPath) && System.IO.File.Exists(result.PdfPath))
+        {
+            await SendDocumentSafeAsync(chatId, result.PdfPath, $"📄 CV para {title} (generado sin IA).");
+        }
+    }
+
+    private async Task HandleUnmarkAsync(ITelegramBotClient bot, long chatId, string argument, CancellationToken ct)
+    {
+        if (await RequireArgument(bot, chatId, argument, "/unmark &lt;id | parte del título | url&gt;", "li_4155609388", ct)) return;
+
+        var offer = _db.FindProcessedOffer(argument, out _);
+        if (offer == null)
+        {
+            await SendHtmlAsync(bot, chatId,
+                $"🔍 No encuentro ninguna oferta registrada que coincida con <code>{Html(argument)}</code>.", ct);
+            return;
+        }
+
+        var removed = _db.RemoveProcessed(offer.Id);
+        await SendHtmlAsync(bot, chatId, removed
+            ? $"🧹 <b>{Html(offer.Title)}</b> vuelve a estar pendiente: se reevaluará en el próximo ciclo o con <code>/scan</code>."
+            : "⚠️ No se pudo eliminar el registro.", ct);
+    }
+
+    private async Task HandleStatsAsync(ITelegramBotClient bot, long chatId)
+    {
+        var stats = _db.GetStats(_config.MinScoreThreshold);
+        await SendHtmlAsync(bot, chatId,
+            "📈 <b>Estadísticas</b>\n\n" +
+            $"• Ofertas evaluadas: <b>{stats.Total}</b>\n" +
+            $"• Por encima del umbral ({_config.MinScoreThreshold}): <b>{stats.Matches}</b>\n" +
+            $"• Media de afinidad: <b>{stats.AverageScore}</b>/100\n" +
+            $"• Últimas 24 h: <b>{stats.Last24h}</b>\n\n" +
+            "<i>Regenera el CV de cualquiera de ellas con <code>/cv &lt;id&gt;</code>.</i>",
+            CancellationToken.None);
+    }
+
+    /// <summary>Devuelve true si faltaba el argumento (ya se ha enviado el mensaje de uso).</summary>
+    private async Task<bool> RequireArgument(
+        ITelegramBotClient bot,
+        long chatId,
+        string argument,
+        string usage,
+        string? example,
+        CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(argument)) return false;
+
+        var text = $"⚠️ Uso: <code>{usage}</code>";
+        if (!string.IsNullOrEmpty(example)) text += $"\nEjemplo: <code>{example}</code>";
+
+        await SendHtmlAsync(bot, chatId, text, ct);
+        return true;
     }
 
     private Task HandleErrorAsync(ITelegramBotClient bot, Exception ex, CancellationToken ct)
@@ -344,13 +533,11 @@ public class TelegramNotifierService
                     elapsed.TotalSeconds, _consecutiveConflicts);
             }
 
-            // Backoff progresivo (máx. 30s) para no martillear la API de Telegram mientras el
-            // conflicto se resuelve por sí solo; el propio receptor de Telegram.Bot reintentará
-            // después de este delay.
+            // Espera creciente hasta 30s, para no ir golpeando la API mientras dura el conflicto
             return Task.Delay(TimeSpan.FromSeconds(Math.Min(5 * _consecutiveConflicts, 30)), ct);
         }
 
-        // Cualquier error que no sea un 409 reinicia el contador de conflictos.
+        // Cualquier error que no sea 409 deja el contador a cero
         _consecutiveConflicts = 0;
         _firstConflictAt = null;
 
@@ -382,26 +569,26 @@ public class TelegramNotifierService
             locationText = "📍 No especificada";
         }
 
-        var strengthsText = eval.Strengths != null && eval.Strengths.Any()
-            ? string.Join("\n", eval.Strengths.Select(s => $"• {EscapeMarkdown(s)}"))
-            : "• _No especificados_";
+        var strengthsText = eval.Strengths is { Count: > 0 }
+            ? string.Join("\n", eval.Strengths.Select(s => $"• {Html(s)}"))
+            : "• <i>No especificados</i>";
 
-        var concernsText = eval.Concerns != null && eval.Concerns.Any()
-            ? string.Join("\n", eval.Concerns.Select(c => $"• {EscapeMarkdown(c)}"))
-            : "• _Ninguno_";
+        var concernsText = eval.Concerns is { Count: > 0 }
+            ? string.Join("\n", eval.Concerns.Select(c => $"• {Html(c)}"))
+            : "• <i>Ninguno</i>";
 
-// El mensaje tiene que estar pegado al margen izquierdo porque si no aparece un tab
+        // Sin el margen el texto sale con un tab al principio
         var message =
-$@"🎯 *NUEVA OFERTA COMPATIBLE* ({eval.Score}/100)
+$@"🎯 <b>NUEVA OFERTA COMPATIBLE</b> ({eval.Score}/100)
 
-🏢 *Empresa:* {EscapeMarkdown(job.Company)}
-💼 *Puesto:* {EscapeMarkdown(job.Title)}
-📌 *Ubicación:* {EscapeMarkdown(locationText)}
+🏢 <b>Empresa:</b> {Html(job.Company)}
+💼 <b>Puesto:</b> {Html(job.Title)}
+📌 <b>Ubicación:</b> {Html(locationText)}
 
-✅ *Puntos Fuertes:*
+✅ <b>Puntos fuertes:</b>
 {strengthsText}
 
-⚠️ *A revisar:*
+⚠️ <b>A revisar:</b>
 {concernsText}";
 
         var inlineKeyboard = new InlineKeyboardMarkup(new[]
@@ -409,38 +596,130 @@ $@"🎯 *NUEVA OFERTA COMPATIBLE* ({eval.Score}/100)
             InlineKeyboardButton.WithUrl("🌐 Abrir oferta", job.Link)
         });
 
+        // Texto y PDF van en try separados: si el texto falla, el documento llega igual
         try
         {
             await _botClient.SendTextMessageAsync(
                 chatId: _config.TelegramChatId,
                 text: message,
-                parseMode: ParseMode.Markdown,
+                parseMode: ParseMode.Html,
                 replyMarkup: inlineKeyboard,
                 cancellationToken: ct
             );
-
-            if (!string.IsNullOrEmpty(pdfPath) && System.IO.File.Exists(pdfPath))
-            {
-                await using var stream = System.IO.File.OpenRead(pdfPath);
-                await _botClient.SendDocumentAsync(
-                    chatId: _config.TelegramChatId,
-                    document: InputFile.FromStream(stream, Path.GetFileName(pdfPath)),
-                    caption: "📄 CV adaptado y listo para adjuntar.",
-                    cancellationToken: ct
-                );
-            }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error al enviar notificación de Telegram.");
+            _logger.LogError(ex, "Error al enviar el mensaje de la oferta '{Title}'.", job.Title);
+        }
+
+        if (!string.IsNullOrEmpty(pdfPath) && System.IO.File.Exists(pdfPath))
+        {
+            await SendDocumentSafeAsync(_config.TelegramChatId, pdfPath, "📄 CV adaptado y listo para adjuntar.");
+        }
+        else
+        {
+            _logger.LogWarning("No hay PDF que adjuntar para '{Title}'.", job.Title);
         }
     }
 
-    private static string EscapeMarkdown(string text)
+    /// <summary>Manda un aviso al chat configurado (texto ya en HTML).</summary>
+    public async Task SendSystemAlertAsync(string html, CancellationToken ct = default)
     {
-        return text.Replace("_", "\\_")
-                   .Replace("*", "\\*")
-                   .Replace("[", "\\[").Replace("]", "\\]")
-                   .Replace("`", "\\`");
+        if (_config.TelegramChatId == 0) return;
+
+        try
+        {
+            await _botClient.SendTextMessageAsync(
+                chatId: _config.TelegramChatId,
+                text: html,
+                parseMode: ParseMode.Html,
+                cancellationToken: ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "No se pudo enviar el aviso de sistema al chat {ChatId}.", _config.TelegramChatId);
+        }
+    }
+
+    private async Task SendDocumentSafeAsync(long chatId, string pdfPath, string caption)
+    {
+        try
+        {
+            await using var stream = System.IO.File.OpenRead(pdfPath);
+            await _botClient.SendDocumentAsync(
+                chatId: chatId,
+                document: InputFile.FromStream(stream, System.IO.Path.GetFileName(pdfPath)),
+                caption: caption,
+                cancellationToken: CancellationToken.None
+            );
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al enviar el PDF '{File}'.", System.IO.Path.GetFileName(pdfPath));
+        }
+    }
+
+    /// <summary>Envía texto con escape HTML y parseo explícito (el sitio más frágil del bot).</summary>
+    private async Task SendHtmlAsync(ITelegramBotClient bot, long chatId, string text, CancellationToken ct = default)
+    {
+        try
+        {
+            await bot.SendTextMessageAsync(
+                chatId: chatId,
+                text: text,
+                parseMode: ParseMode.Html,
+                cancellationToken: ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "No se pudo enviar un mensaje de texto al chat {ChatId}.", chatId);
+        }
+    }
+
+    private Task SendAsync(ITelegramBotClient bot, long chatId, string text, CancellationToken ct) =>
+        bot.SendTextMessageAsync(chatId: chatId, text: text, cancellationToken: ct);
+
+    private static string BuildHelpText() =>
+        "🤖 <b>CareerCopilot — panel de control</b>\n\n" +
+        "<b>Búsqueda</b>\n" +
+        "• <code>/run</code> — ciclo completo de búsqueda y análisis\n" +
+        "• <code>/scan &lt;término&gt;</code> — buscar un término concreto sin añadirlo a las búsquedas\n" +
+        "• <code>/test</code> — probar Gemini + Typst + Telegram con una oferta ficticia\n\n" +
+        "<b>CVs</b>\n" +
+        "• <code>/cv &lt;id | parte del título | empresa | url&gt;</code> — reevaluar y regenerar el CV de una oferta ya vista\n" +
+        "• <code>/cv &lt;id&gt; local</code> · <code>/cvlocal &lt;id&gt;</code> — generar el CV sin Gemini, para cuando no hay cuota\n" +
+        "• <code>/cvlocal &lt;título&gt; || &lt;descripción&gt;</code> — generar el CV de una oferta que pegues\n" +
+        "• <code>/unmark &lt;id&gt;</code> — desmarcar una oferta para que se reevalúe en el próximo ciclo\n" +
+        "• <code>/stats</code> — ofertas evaluadas, coincidencias y media de afinidad\n\n" +
+        "<b>Búsquedas persistentes</b>\n" +
+        "• <code>/addjob &lt;término&gt;</code> · <code>/removejob &lt;término&gt;</code> · <code>/listjobs</code>\n\n" +
+        "<b>Filtros y puntuación</b>\n" +
+        "• <code>/addrequired &lt;palabra&gt;</code> · <code>/removerequired &lt;palabra&gt;</code>\n" +
+        "• <code>/addexcluded &lt;palabra&gt;</code> · <code>/removeexcluded &lt;palabra&gt;</code>\n" +
+        "• <code>/filters</code> — ver los filtros activos\n" +
+        "• <code>/threshold &lt;0-100&gt;</code> — corte de afinidad para generar CV\n\n" +
+        "<b>General</b>\n" +
+        "• <code>/status</code> — métricas y estado del escaneo\n" +
+        "• <code>/help</code> — esta ayuda";
+
+    /// <summary>Escape para ParseMode.Html: solo tres caracteres tienen entidad reservada.</summary>
+    private static string Html(string? text) =>
+        (text ?? string.Empty)
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;");
+
+    private sealed class NullManualActions : IManualActions
+    {
+        public static readonly NullManualActions Instance = new();
+
+        public bool IsBusy => false;
+        public string BusyOrigin => "indisponible";
+        public Task<bool> RunPipelineAsync(CancellationToken ct) => Task.FromResult(false);
+        public Task<bool> RunAdHocScanAsync(string query, CancellationToken ct) => Task.FromResult(false);
+        public Task<CvRequestResult> RegenerateCvAsync(JobOffer offer, CancellationToken ct, bool localOnly = false) =>
+            Task.FromResult(new CvRequestResult(false, "❌ El pipeline no está disponible."));
+
+        public KeywordCoverage CheckKeywords(JobOffer offer) => new([], []);
     }
 }
