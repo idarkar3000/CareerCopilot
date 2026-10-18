@@ -21,13 +21,10 @@ public class JobScraperService
         _logger = logger;
         _config = config;
 
-        // appsettings.json:
-        // "JobSources": { "Adzuna": { "AppId": "...", "AppKey": "..." } }
         _adzunaAppId = configuration["JobSources:Adzuna:AppId"];
         _adzunaAppKey = configuration["JobSources:Adzuna:AppKey"];
     }
 
-    // --- 1. TECNOEMPLEO (Extractor HTML limpio sobre el listado real) ---
     public async Task<List<JobOffer>> FetchTecnoEmpleoJobsAsync(string query, CancellationToken ct)
     {
         var list = new List<JobOffer>();
@@ -44,7 +41,6 @@ public class JobScraperService
 
             var html = await response.Content.ReadAsStringAsync(ct);
 
-            // Coincide con los enlaces directos a las fichas de trabajo de Tecnoempleo
             var matches = Regex.Matches(html, @"href=""(https://www\.tecnoempleo\.com/[^""]*?rf-[a-z0-9\-]+)""[^>]*?>([^<]+)</a>", RegexOptions.IgnoreCase);
 
             foreach (Match m in matches)
@@ -85,7 +81,6 @@ public class JobScraperService
         return list;
     }
 
-    // --- 2. LINKEDIN GUEST API (Principal motor estable) ---
     public async Task<List<JobOffer>> FetchLinkedInJobsAsync(string query, CancellationToken ct)
     {
         var list = new List<JobOffer>();
@@ -157,7 +152,6 @@ public class JobScraperService
         return list;
     }
 
-    // --- 3. REMOTIVE API (API Pública JSON sin Cloudflare - Ofertas de Software remoto compatibles) ---
     public async Task<List<JobOffer>> FetchRemotiveJobsAsync(CancellationToken ct)
     {
         var list = new List<JobOffer>();
@@ -183,7 +177,6 @@ public class JobScraperService
                     var jobUrl = item.GetProperty("url").GetString() ?? "";
                     var candidateLocations = item.TryGetProperty("candidate_required_location", out var loc) ? loc.GetString() ?? "" : "";
 
-                    // Filtrar por ofertas aplicables a España / Worldwide y tecnologías .NET / C#
                     var text = $"{title} {candidateLocations}".ToLowerInvariant();
                     if ((text.Contains("c#") || text.Contains(".net") || text.Contains("backend")) &&
                         (candidateLocations.Contains("Spain", StringComparison.OrdinalIgnoreCase) ||
@@ -214,7 +207,6 @@ public class JobScraperService
         return list;
     }
 
-    // --- 4. ADZUNA API (Sustituto legal y estable de Indeed España) ---
     public async Task<List<JobOffer>> FetchAdzunaJobsAsync(string query, CancellationToken ct)
     {
         var list = new List<JobOffer>();
@@ -303,7 +295,6 @@ public class JobScraperService
         return list;
     }
 
-    // --- 5. INFOJOBS API ---
     public async Task<List<JobOffer>> FetchInfoJobsJobsAsync(string query, CancellationToken ct)
     {
         var list = new List<JobOffer>();
@@ -399,7 +390,6 @@ public class JobScraperService
         return list;
     }
 
-    // --- 6. FEEDS RSS/ATOM GENÉRICOS ---
     public async Task<List<JobOffer>> FetchGenericFeedsAsync(CancellationToken ct)
     {
         var list = new List<JobOffer>();

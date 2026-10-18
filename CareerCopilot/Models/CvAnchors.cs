@@ -2,10 +2,6 @@ using System.Text.Json.Serialization;
 
 namespace CareerCopilot.Models;
 
-/// <summary>
-/// Datos que el CV no puede dejar vacíos aunque el modelo no los devuelva. Van en el bloque
-/// cv-anchors de prompts/profile.md y el compilador los mete sobre lo que devuelve Gemini.
-/// </summary>
 public sealed class CvAnchors
 {
     [JsonPropertyName("experience")]
@@ -14,7 +10,6 @@ public sealed class CvAnchors
     [JsonPropertyName("projects")]
     public List<CvAnchorEntry> Projects { get; set; } = new();
 
-    /// <summary>Resumen, habilidades, formación e idiomas. Permite montar un CV sin llamar a Gemini.</summary>
     [JsonPropertyName("profile")]
     public CvProfileAnchors Profile { get; set; } = new();
 
@@ -35,7 +30,6 @@ public sealed class CvProfileAnchors
     [JsonPropertyName("languages")]
     public List<CvAnchorLine> Languages { get; set; } = new();
 
-    /// <summary>True si hay con qué montar un CV local sin depender de Gemini.</summary>
     public bool IsEmpty =>
         string.IsNullOrWhiteSpace(Summary) &&
         Skills.Count == 0 && Education.Count == 0 && Languages.Count == 0;
@@ -73,14 +67,9 @@ public sealed class CvAnchorEntry
     [JsonPropertyName("urlLabel")]
     public string UrlLabel { get; set; } = string.Empty;
 
-    /// <summary>Descripción en primera persona. Se usa si el modelo no trae viñetas.</summary>
     [JsonPropertyName("fallback")]
     public string Fallback { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Todos los puntos que se pueden contar de esta entrada, uno por competencia. De aquí se
-    /// eligen los que mejor encajen con cada oferta.
-    /// </summary>
     [JsonPropertyName("points")]
     public List<string> Points { get; set; } = new();
 }

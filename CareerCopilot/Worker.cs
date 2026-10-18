@@ -14,11 +14,9 @@ public class Worker : BackgroundService, IManualActions
     private readonly LocalCvBuilder _localCv;
     private readonly TelegramNotifierService _notifier;
 
-    // Va sumando para no escanear siempre los mismos términos en LinkedIn
     private int _linkedInRotationOffset = 0;
     private int _evaluationsThisCycle;
 
-    // Bloquea el escaneo para que el ciclo y los comandos /run y /scan no se pisen
     private readonly Lock _pipelineLock = new();
     private bool _pipelineBusy;
     private string _pipelineOrigin = string.Empty;
@@ -68,7 +66,6 @@ public class Worker : BackgroundService, IManualActions
         }
     }
 
-    /// <summary>Si hay un escaneo en marcha lo consulta TelegramNotifierService para avisar.</summary>
     public bool IsBusy
     {
         get
@@ -80,7 +77,6 @@ public class Worker : BackgroundService, IManualActions
         }
     }
 
-    /// <summary>Motivo del escaneo en curso, para el aviso de "ya hay uno corriendo".</summary>
     public string BusyOrigin
     {
         get
@@ -92,7 +88,6 @@ public class Worker : BackgroundService, IManualActions
         }
     }
 
-    /// <summary>Escanea todas las fuentes. Devuelve false si ya había otro escaneo en marcha.</summary>
     public async Task<bool> RunPipelineAsync(CancellationToken ct)
     {
         if (!TryBeginPipeline("ciclo programado")) return false;
@@ -101,7 +96,6 @@ public class Worker : BackgroundService, IManualActions
         {
             var allOffers = new List<JobOffer>();
 
-            // 1. Tecnoempleo (HTML Parser)
             var tecnoQueries = new[] { "c#", ".net" };
             var tecnoTotal = 0;
             foreach (var tq in tecnoQueries)
@@ -114,7 +108,6 @@ public class Worker : BackgroundService, IManualActions
             }
             _logger.LogInformation(">>> [Tecnoempleo] Obtenidas: {Count} ofertas", tecnoTotal);
 
-            // 2. Adzuna API
             var adzunaQueries = new[] { "c# junior", ".net junior" };
             var adzunaTotal = 0;
             foreach (var aq in adzunaQueries)
@@ -127,13 +120,11 @@ public class Worker : BackgroundService, IManualActions
             }
             _logger.LogInformation(">>> [Adzuna API] Obtenidas: {Count} ofertas", adzunaTotal);
 
-            // 3. Remotive API
             var remoteOffers = await _scraper.FetchRemotiveJobsAsync(ct);
             allOffers.AddRange(remoteOffers);
             _logger.LogInformation(">>> [Remotive API] Obtenidas: {Count} ofertas", remoteOffers.Count);
             await Task.Delay(1000, ct);
 
-            // 4. InfoJobs API
             var infoJobsQueries = new[] { "c# junior", ".net junior", "programador .net trainee" };
             var infoJobsTotal = 0;
             foreach (var ijq in infoJobsQueries)
@@ -146,7 +137,6 @@ public class Worker : BackgroundService, IManualActions
             }
             _logger.LogInformation(">>> [InfoJobs API] Obtenidas: {Count} ofertas", infoJobsTotal);
 
-            // 5. Feeds RSS/Atom genéricos
             if (_config.Feeds is { Count: > 0 })
             {
                 var feedOffers = await _scraper.FetchGenericFeedsAsync(ct);
@@ -154,7 +144,6 @@ public class Worker : BackgroundService, IManualActions
                 _logger.LogInformation(">>> [Feeds RSS] Obtenidas: {Count} ofertas", feedOffers.Count);
             }
 
-            // 6. LinkedIn — rotando el subconjunto de términos activos
             var allQueries = _db.GetSearchQueries();
             List<string> activeQueries;
             if (allQueries.Count <= 4)
@@ -163,6 +152,7 @@ public class Worker : BackgroundService, IManualActions
             }
             else
             {
+                // Rota 4 búsquedas por ciclo: así LinkedIn no recibe siempre las mismas de golpe.
                 activeQueries = allQueries.Skip(_linkedInRotationOffset % allQueries.Count).Take(4).ToList();
                 if (activeQueries.Count < 4)
                 {
@@ -202,10 +192,6 @@ public class Worker : BackgroundService, IManualActions
         }
     }
 
-    /// <summary>
-    /// Procesa una oferta sin dejar que un fallo tumbe el ciclo entero. Un CV que no se compila no
-    /// puede costar las 69 ofertas que faltaban por evaluar.
-    /// </summary>
     private async Task ProcessOfferSafelyAsync(JobOffer offer, CancellationToken ct)
     {
         try
@@ -218,10 +204,6 @@ public class Worker : BackgroundService, IManualActions
         }
     }
 
-    /// <summary>
-    /// Escaneo del comando /scan. Solo usa las fuentes que aceptan un término de búsqueda y no lo
-    /// guarda en SearchQueries, así que no entra en el rastreo recurrente.
-    /// </summary>
     public async Task<bool> RunAdHocScanAsync(string query, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
@@ -275,7 +257,6 @@ public class Worker : BackgroundService, IManualActions
         }
     }
 
-    /// <summary>Pasos comunes al ciclo y a /scan: filtro local, Gemini, compilación y aviso.</summary>
     private async Task ProcessOfferAsync(JobOffer offer, CancellationToken ct)
     {
         if (_db.HasBeenProcessed(offer.Id))
@@ -290,8 +271,6 @@ public class Worker : BackgroundService, IManualActions
             return;
         }
 
-        // Cada evaluación gasta una petición de la cuota diaria de Gemini. Al llegar al tope se
-        // sale sin marcar la oferta, así el siguiente ciclo la recupera
         if (!TryTakeEvaluationSlot())
         {
             _logger.LogInformation(
@@ -305,8 +284,6 @@ public class Worker : BackgroundService, IManualActions
 
         if (eval == null)
         {
-            // No se marca como procesada: si Gemini falla la oferta puede encajar, así que se
-            // vuelve a intentar en el próximo ciclo
             _logger.LogWarning(
                 "Gemini no pudo evaluar '{Title}' (respuesta vacía o no disponible); se reintentará más adelante.",
                 offer.Title);
@@ -338,10 +315,6 @@ public class Worker : BackgroundService, IManualActions
         await Task.Delay(5000, ct);
     }
 
-    /// <summary>
-    /// Regenera el CV de una oferta ya registrada (comando /cv) sin tocar los procesados. Si se
-    /// pide local o no queda cuota de Gemini, el CV se monta con el texto del perfil.
-    /// </summary>
     public async Task<CvRequestResult> RegenerateCvAsync(JobOffer offer, CancellationToken ct, bool localOnly = false)
     {
         if (!TryBeginPipeline($"/cv '{Shorten(offer.Title)}'"))
@@ -365,7 +338,6 @@ public class Worker : BackgroundService, IManualActions
 
                 if (eval == null)
                 {
-                    // Sin cuota no se pierde la oferta: el CV se monta con el perfil
                     fellBack = true;
                     _logger.LogWarning("Gemini no pudo evaluar '{Title}'; se genera el CV en modo local.", offer.Title);
                 }
@@ -413,10 +385,6 @@ public class Worker : BackgroundService, IManualActions
         }
     }
 
-    /// <summary>
-    /// Mensaje del CV generado sin Gemini. No da un score porque una cuenta de palabras clave no es
-    /// una evaluación: en su lugar enseña qué palabras de los filtros aparecen en la oferta.
-    /// </summary>
     private CvRequestResult LocalCvMessage(JobOffer offer, string pdfPath, bool fellBack, string suffix)
     {
         var coverage = CheckKeywords(offer);
@@ -442,10 +410,6 @@ public class Worker : BackgroundService, IManualActions
             IsLocal: true, Coverage: coverage);
     }
 
-    /// <summary>
-    /// Qué palabras clave de los filtros hay en la oferta. Es una cuenta de coincidencias, no una
-    /// evaluación: solo sirve para saber qué has marcado y qué te falta.
-    /// </summary>
     public KeywordCoverage CheckKeywords(JobOffer offer)
     {
         var text = CandidateProfileProvider.Normalize($"{offer.Title} {offer.Description}");
@@ -471,7 +435,6 @@ public class Worker : BackgroundService, IManualActions
         return joined.Length > 300 ? joined[..300] + "…" : joined;
     }
 
-    /// <summary>Aviso de que Gemini no pudo evaluar. Se manda solo una vez por ciclo.</summary>
     private async Task ReportGeminiFailureAsync(JobOffer offer, CancellationToken ct)
     {
         lock (_pipelineLock)
@@ -512,7 +475,6 @@ public class Worker : BackgroundService, IManualActions
         }
     }
 
-    /// <summary>Devuelve false si el ciclo ya evaluó el máximo de ofertas de BotConfig.</summary>
     private bool TryTakeEvaluationSlot()
     {
         lock (_pipelineLock)
@@ -553,11 +515,6 @@ public class Worker : BackgroundService, IManualActions
         return PassesLocationFilter(offer, text);
     }
 
-    /// <summary>
-    /// Filtro de ubicación. Acepta si es remota o si la ubicación está en LocationFilter. Con la
-    /// lista vacía no filtra. Si la fuente no da ubicación, la oferta pasa igual: sin datos no se
-    /// puede descartar.
-    /// </summary>
     private bool PassesLocationFilter(JobOffer offer, string combinedText)
     {
         var filter = _config.LocationFilter;
@@ -573,7 +530,6 @@ public class Worker : BackgroundService, IManualActions
 
         if (filter.AcceptedLocations is not { Count: > 0 }) return true;
 
-        // Sin provincia ni ciudad no hay información suficiente para descartar la oferta.
         if (string.IsNullOrWhiteSpace(offer.Province) && string.IsNullOrWhiteSpace(offer.City))
         {
             _logger.LogDebug(

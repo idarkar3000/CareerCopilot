@@ -4,10 +4,6 @@ using Microsoft.Data.Sqlite;
 
 namespace CareerCopilot.Services;
 
-/// <summary>
-/// Ofertas ya vistas. Guarda también los datos de cada una para poder rehacer el CV (/cv) o
-/// quitar el marcado (/unmark) sin scrapear otra vez.
-/// </summary>
 public class JobDatabase
 {
     private const string ConnectionString = "Data Source=jobs.db";
@@ -30,7 +26,6 @@ public class JobDatabase
             );";
         command.ExecuteNonQuery();
 
-        // Columnas que se añadieron después de crear la tabla
         EnsureColumn(connection, "ProcessedJobs", "Link", "TEXT");
         EnsureColumn(connection, "ProcessedJobs", "Description", "TEXT");
         EnsureColumn(connection, "ProcessedJobs", "Province", "TEXT");
@@ -90,7 +85,6 @@ public class JobDatabase
         command.ExecuteNonQuery();
     }
 
-    /// <summary>Busca por id exacto y, si no hay, por fragmento de id, título o empresa.</summary>
     public JobOffer? FindProcessedOffer(string term, out int score)
     {
         score = 0;
@@ -134,7 +128,6 @@ public class JobDatabase
             !reader.IsDBNull(7) && reader.GetInt64(7) != 0);
     }
 
-    /// <summary>Borra el registro para que la oferta vuelva a evaluarse.</summary>
     public bool RemoveProcessed(string id)
     {
         using var connection = new SqliteConnection(ConnectionString);

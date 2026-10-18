@@ -25,10 +25,8 @@ public class TelegramNotifierService
     private DateTime? _firstConflictAt;
     private static readonly TimeSpan ConflictEscalationWindow = TimeSpan.FromSeconds(90);
 
-    /// <summary>Tiempo máximo que se deja correr un escaneo lanzado a mano desde el chat.</summary>
     private static readonly TimeSpan ManualScanTimeout = TimeSpan.FromMinutes(15);
 
-    /// <summary>Separa el título de la descripción en "/cvlocal Título || Descripción".</summary>
     private const string TitleDescriptionSeparator = "||";
 
     public TelegramNotifierService(
@@ -48,7 +46,6 @@ public class TelegramNotifierService
         _botClient = new TelegramBotClient(_config.TelegramBotToken);
     }
 
-    /// <summary>Empieza el long polling. Borra antes el webhook si quedó puesto.</summary>
     public async Task StartReceivingAsync(CancellationToken ct)
     {
         lock (_lock)
@@ -336,7 +333,6 @@ public class TelegramNotifierService
         _ = RunInBackgroundAsync(chatId, argument);
     }
 
-    /// <summary>Dispara el escaneo en segundo plano y avisa cuando acaba.</summary>
     private async Task RunInBackgroundAsync(long chatId, string? query)
     {
         var manual = ResolveManual();
@@ -372,12 +368,10 @@ public class TelegramNotifierService
         }
     }
 
-    /// <summary>Regenera el CV de una oferta. forceLocal equivale a escribir "local" detrás del argumento.</summary>
     private async Task HandleCvAsync(ITelegramBotClient bot, long chatId, string argument, bool forceLocal, CancellationToken ct)
     {
         if (await RequireArgument(bot, chatId, argument, "/cv &lt;id | parte del título | empresa | url&gt; [local]", "li_4155609388", ct)) return;
 
-        // "local" al final fuerza el CV sin Gemini, para cuando no queda cuota
         var localOnly = forceLocal;
         var query = argument;
         if (!localOnly && query.TrimEnd().EndsWith(" local", StringComparison.OrdinalIgnoreCase))
@@ -386,7 +380,6 @@ public class TelegramNotifierService
             query = query.TrimEnd()[..^" local".Length].Trim();
         }
 
-        // "/cvlocal Titulo || Descripcion" para una oferta que pegues tú y no esté registrada
         if (query.Contains(TitleDescriptionSeparator, StringComparison.Ordinal))
         {
             await GenerateFromPastedOfferAsync(bot, chatId, query, ct);
@@ -427,10 +420,6 @@ public class TelegramNotifierService
         }
     }
 
-    /// <summary>
-    /// Genera el CV de una oferta que el usuario pega, para cuando no hay cuota y la oferta nunca
-    /// llegó a registrarse. Se usa como título y descripción de la oferta, sin tocar la base.
-    /// </summary>
     private async Task GenerateFromPastedOfferAsync(ITelegramBotClient bot, long chatId, string argument, CancellationToken ct)
     {
         var parts = argument.Split(TitleDescriptionSeparator, 2, StringSplitOptions.TrimEntries);
@@ -491,7 +480,6 @@ public class TelegramNotifierService
             CancellationToken.None);
     }
 
-    /// <summary>Devuelve true si faltaba el argumento (ya se ha enviado el mensaje de uso).</summary>
     private async Task<bool> RequireArgument(
         ITelegramBotClient bot,
         long chatId,
@@ -533,11 +521,9 @@ public class TelegramNotifierService
                     elapsed.TotalSeconds, _consecutiveConflicts);
             }
 
-            // Espera creciente hasta 30s, para no ir golpeando la API mientras dura el conflicto
             return Task.Delay(TimeSpan.FromSeconds(Math.Min(5 * _consecutiveConflicts, 30)), ct);
         }
 
-        // Cualquier error que no sea 409 deja el contador a cero
         _consecutiveConflicts = 0;
         _firstConflictAt = null;
 
@@ -577,7 +563,6 @@ public class TelegramNotifierService
             ? string.Join("\n", eval.Concerns.Select(c => $"• {Html(c)}"))
             : "• <i>Ninguno</i>";
 
-        // Sin el margen el texto sale con un tab al principio
         var message =
 $@"🎯 <b>NUEVA OFERTA COMPATIBLE</b> ({eval.Score}/100)
 
@@ -596,7 +581,6 @@ $@"🎯 <b>NUEVA OFERTA COMPATIBLE</b> ({eval.Score}/100)
             InlineKeyboardButton.WithUrl("🌐 Abrir oferta", job.Link)
         });
 
-        // Texto y PDF van en try separados: si el texto falla, el documento llega igual
         try
         {
             await _botClient.SendTextMessageAsync(
@@ -622,7 +606,6 @@ $@"🎯 <b>NUEVA OFERTA COMPATIBLE</b> ({eval.Score}/100)
         }
     }
 
-    /// <summary>Manda un aviso al chat configurado (texto ya en HTML).</summary>
     public async Task SendSystemAlertAsync(string html, CancellationToken ct = default)
     {
         if (_config.TelegramChatId == 0) return;
@@ -659,7 +642,6 @@ $@"🎯 <b>NUEVA OFERTA COMPATIBLE</b> ({eval.Score}/100)
         }
     }
 
-    /// <summary>Envía texto con escape HTML y parseo explícito (el sitio más frágil del bot).</summary>
     private async Task SendHtmlAsync(ITelegramBotClient bot, long chatId, string text, CancellationToken ct = default)
     {
         try
@@ -702,7 +684,6 @@ $@"🎯 <b>NUEVA OFERTA COMPATIBLE</b> ({eval.Score}/100)
         "• <code>/status</code> — métricas y estado del escaneo\n" +
         "• <code>/help</code> — esta ayuda";
 
-    /// <summary>Escape para ParseMode.Html: solo tres caracteres tienen entidad reservada.</summary>
     private static string Html(string? text) =>
         (text ?? string.Empty)
             .Replace("&", "&amp;")

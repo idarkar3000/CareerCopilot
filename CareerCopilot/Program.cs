@@ -13,20 +13,14 @@ builder.Services.AddSingleton<CvSanitizer>();
 builder.Services.AddHttpClient<JobScraperService>();
 builder.Services.AddHttpClient<GeminiScorerService>(client =>
 {
-    // Sin esto se hereda el valor por defecto de HttpClient, que son 100s por llamada
     client.Timeout = TimeSpan.FromSeconds(Math.Clamp(botConfig.GeminiTimeoutSeconds, 5, 90));
 });
 builder.Services.AddSingleton<CvCompilerService>();
 builder.Services.AddSingleton<LocalCvBuilder>();
 
-// Worker se registra dos veces a propÃ³sito: como singleton (lo resuelve TelegramNotifierService
-// para /run, /scan y /cv) y como IHostedService devolviendo esa MISMA instancia, para que el
-// ciclo automÃ¡tico y los comandos compartan estado en vez de ser dos Workers distintos.
 builder.Services.AddSingleton<Worker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Worker>());
 
-// TelegramNotifierService necesita lanzar el pipeline y Worker necesita a TelegramNotifierService
-// para notificar. IManualActions se resuelve de forma perezosa cuando se usa, no al montar el DI.
 builder.Services.AddSingleton<TelegramNotifierService>(sp =>
 {
     var config = sp.GetRequiredService<BotConfig>();
@@ -46,9 +40,6 @@ builder.Services.AddSingleton<TelegramNotifierService>(sp =>
 
 var app = builder.Build();
 
-// Los datos de cabecera llegan de variables de entorno y no hay forma de saber en Render cuÃ¡les
-// faltan hasta que el CV sale sin nombre. Se avisa al arrancar con el nombre exacto que hay que
-// crear, en lugar de fallar mÃ¡s tarde y sin contexto.
 WarnMissingCandidateSettings(app.Logger, botConfig);
 
 app.MapMethods("/", new[] { "GET", "HEAD" }, () => Results.Ok(new
@@ -62,9 +53,7 @@ app.MapMethods("/health", new[] { "GET", "HEAD" }, () => Results.Ok("OK"));
 
 app.Run();
 
-// --- Comprobaciones de arranque ---
 
-// Comprueba si un campo viene vacÃ­o y devuelve el nombre de la variable que lo rellena.
 static bool Missing(string? value, string envName, List<string> missing)
 {
     if (!string.IsNullOrWhiteSpace(value)) return false;
@@ -73,15 +62,10 @@ static bool Missing(string? value, string envName, List<string> missing)
     return true;
 }
 
-/// <summary>
-/// Lista los campos de Candidate que llegan vacÃ­os. El nombre es el Ãºnico imprescindible: sin Ã©l
-/// la cabecera sale en blanco y el PDF no lleva identificador, asÃ­ que se avisa como error.
-/// </summary>
 static void WarnMissingCandidateSettings(ILogger logger, BotConfig config)
 {
     var candidate = config.Candidate;
 
-    // FullName sÃ­ o sÃ­: la cabecera y el nombre del PDF dependen de Ã©l
     var requiredMissing = new List<string>();
     Missing(candidate.FullName, "BotConfig__Candidate__FullName", requiredMissing);
 

@@ -18,24 +18,16 @@ public class GeminiScorerService
         PropertyNameCaseInsensitive = true
     };
 
-    // Modelos marcados como agotados hasta su reset diario (medianoche hora del Pacífico)
     private readonly Dictionary<string, DateTimeOffset> _exhaustedModels = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// Fallos seguidos por modelo. Google responde 503 cuando un modelo está saturado, y eso no
-    /// marca cuota agotada, así que se cuenta y solo se salta el modelo cuando insiste.
-    /// </summary>
     private readonly Dictionary<string, int> _failures = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Fallos seguidos a partir de los cuales un modelo se deja de llamar.</summary>
     private const int MaxConsecutiveFailures = 3;
 
     private readonly Lock _quotaLock = new();
 
-    /// <summary>Último modelo que devolvió una evaluación válida; se prueba primero.</summary>
     private volatile string? _preferredModel;
 
-    // Modelos que se van probando por orden hasta que uno devuelva una evaluación válida
     private static readonly string[] ActiveModels =
     {
         "gemini-3.8-flash",
@@ -91,13 +83,13 @@ public class GeminiScorerService
         return null;
     }
 
-    /// <summary>Reordena los modelos para saltar los agotados y priorizar el que más ha funcionado.</summary>
     private List<string> BuildModelOrder()
     {
         lock (_quotaLock)
         {
             PruneExhausted();
 
+            // Usa primero el modelo que ya funcionó y deja fuera los que se han quedado sin cuota.
             var available = ActiveModels.Where(m => !_exhaustedModels.ContainsKey(m)).ToList();
 
             if (_preferredModel is not null && available.Remove(_preferredModel))
@@ -147,10 +139,6 @@ public class GeminiScorerService
             model, resume.ToPacificTime());
     }
 
-    /// <summary>
-    /// Anota un fallo del modelo. Un 429 es definitivo y lo aparta enseguida; un 503 o un timeout
-    /// solo lo apartan cuando se repiten, para no perder el modelo por un pico puntual de demanda.
-    /// </summary>
     private void RegisterFailure(string model, bool definitive)
     {
         lock (_quotaLock)
@@ -174,7 +162,6 @@ public class GeminiScorerService
         }
     }
 
-    /// <summary>El modelo respondió bien, así que se le olvida todo lo anterior.</summary>
     private void RegisterSuccess(string model)
     {
         lock (_quotaLock)
@@ -183,7 +170,6 @@ public class GeminiScorerService
         }
     }
 
-    /// <summary>Llama al modelo y reintenta una vez si la cuota dice que no (429/503).</summary>
     private async Task<EvaluationResult?> CallWithQuotaRetryAsync(string model, string jobTitle, object payload, CancellationToken ct)
     {
         const int maxAttempts = 2;
@@ -220,7 +206,6 @@ public class GeminiScorerService
 
                 if (statusCode is 429 or 503)
                 {
-                    // 429 es cuota agotada; 503 es demanda alta y puede ser un pico pasajero
                     var motivo = statusCode == 429 ? "sin cuota" : "saturado";
                     RegisterFailure(model, definitive: statusCode == 429);
 
@@ -248,7 +233,6 @@ public class GeminiScorerService
             }
             catch (TaskCanceledException) when (!ct.IsCancellationRequested)
             {
-                // El timeout del HttpClient, no una cancelación: el modelo se quedó colgado
                 RegisterFailure(model, definitive: false);
 
                 _logger.LogWarning(
@@ -271,7 +255,6 @@ public class GeminiScorerService
         return null;
     }
 
-    /// <summary>Recorta el cuerpo de un error de la API para no volcar kilobytes en el log.</summary>
     private static string Summarize(string body) =>
         body.Length <= 300 ? body : body[..300] + "...";
 
@@ -395,7 +378,6 @@ public class GeminiScorerService
                                                 }
                                             }
                                         },
-                                        // Sin esto el modelo puede devolver 'sections' vacío
                                         required = new[] { "heading", "priority", "kind", "items" }
                                     }
                                 }
@@ -458,8 +440,6 @@ public class GeminiScorerService
         result.Strengths ??= new List<string>();
         result.Concerns ??= new List<string>();
 
-        // Sin secciones no hay nada que maquetar. Se cuenta como fallo del modelo para que el
-        // bucle pruebe con el siguiente en vez de avisar de un CV inexistente.
         if (result.Cv == null || result.Cv.Sections.Count == 0)
         {
             _logger.LogWarning(
@@ -480,7 +460,6 @@ public class GeminiScorerService
         return result;
     }
 
-    /// <summary>Registra la estructura que devolvió el modelo: qué entradas vienen incompletas.</summary>
     private void LogCvShape(CvDocument cv, string model)
     {
         var entries = cv.Sections
@@ -545,7 +524,6 @@ internal static class PacificTime
         TimeZoneInfo.FindSystemTimeZoneById(
             OperatingSystem.IsWindows() ? "Pacific Standard Time" : "America/Los_Angeles");
 
-    /// <summary>La cuota diaria del tier gratuito de Gemini se reinicia a medianoche en el Pacífico.</summary>
     public static DateTimeOffset NextPacificMidnight(this DateTimeOffset now)
     {
         var local = TimeZoneInfo.ConvertTime(now, Zone);

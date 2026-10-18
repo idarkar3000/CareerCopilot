@@ -7,29 +7,18 @@ using UglyToad.PdfPig;
 
 namespace CareerCopilot.Services;
 
-/// <summary>
-/// Maqueta en Typst el documento que devuelve Gemini. No fija ningún contenido: solo coloca las
-/// secciones generadas. Para que quepa en una página A4 primero recorta por prioridad y luego
-/// baja el cuerpo de letra.
-/// </summary>
 public class CvCompilerService
 {
     private readonly ILogger<CvCompilerService> _logger;
     private readonly BotConfig _config;
     private readonly CandidateProfileProvider _profile;
 
-    private const int MaxSummaryChars = 340;   // tres líneas; el prompt pide 200-280 y esto es el seguro
-    private const int MaxBulletChars = 240;    // 2 líneas
-    private const int MaxLineChars = 240;      // línea tipo "Lenguajes: ..."
-    private const int MaxFieldChars = 90;      // título, empresa, fechas, stack
+    private const int MaxSummaryChars = 340;
+    private const int MaxBulletChars = 240;
+    private const int MaxLineChars = 240;
+    private const int MaxFieldChars = 90;
     private const int MaxBulletsDefault = 5;
 
-    /// <summary>
-    /// Niveles de ajuste. El primero no recorta nada y cada uno siguiente quita las secciones con
-    /// prioridad igual o superior a la indicada. Los cuatro primeros solo bajan el cuerpo de letra,
-    /// así que Idiomas no se sacrifica hasta 8.1pt. Después ya se quita contenido, y la experiencia
-    /// mantiene sus viñetas hasta el penúltimo nivel.
-    /// </summary>
     private static readonly (decimal FontSize, int DropPriorityAtOrAbove, int MaxBullets, int ExperienceBullets)[] FitLadder =
     {
         (9.0m, 0, 0, 5),
@@ -41,11 +30,6 @@ public class CvCompilerService
         (7.8m, 2, 3, 4)
     };
 
-    /// <summary>
-    /// Concepto de cada sección y orden en que se maquetan. La clave es lo que se busca dentro del
-    /// título normalizado, así que "EXPERIENCIA LABORAL (EPAM)" y "Experiencia Profesional" caen
-    /// en la misma entrada. También fija la cabecera canónica que se imprime.
-    /// </summary>
     private static readonly (string Needle, int Rank, string Heading)[] SectionOrder =
     {
         ("experienc", 0, "Experiencia Laboral"),
@@ -82,8 +66,6 @@ public class CvCompilerService
         var outputDir = ResolveOutputDir();
         Directory.CreateDirectory(outputDir);
 
-        // Fusionar antes de aplicar las anclas: si no, la experiencia que llega del perfil se
-        // pegaría a la primera de las secciones repetidas y el resto se quedaría sin imprimir.
         CoalesceSections(eval.Cv);
         ApplyAnchors(eval.Cv, job);
         OrderSections(eval.Cv);
@@ -93,7 +75,6 @@ public class CvCompilerService
         var typstFile = Path.Combine(outputDir, $"{baseFileName}.typ");
         var pdfFile = Path.Combine(outputDir, $"{baseFileName}.pdf");
 
-        // Los .typ de intentos anteriores se borran, solo vale el PDF final
         foreach (var stale in Directory.EnumerateFiles(outputDir, $"{baseFileName}.*.pdf"))
         {
             TryDelete(stale);
@@ -101,6 +82,7 @@ public class CvCompilerService
 
         string? lastAttemptPdf = null;
 
+        // Prueba el CV con varios tamaños de letra y recortes hasta que quepa en una sola página A4.
         for (var i = 0; i < FitLadder.Length; i++)
         {
             var (fontSize, dropPriorityAtOrAbove, maxBullets, experienceBullets) = FitLadder[i];
@@ -164,9 +146,6 @@ public class CvCompilerService
         var namePart = SanitizeFileName(candidate.FullName, 40);
         var jobPart = SanitizeFileName(job.Title, 45);
 
-        // Sin puesto no hay nada que nombrar: un identificador único evita que dos archivos
-        // distintos acaben con el mismo nombre. Ojo, el identificador son 35 caracteres, así que
-        // aquí no se puede recortar a 40.
         if (string.IsNullOrWhiteSpace(jobPart))
         {
             _logger.LogWarning(
@@ -175,8 +154,6 @@ public class CvCompilerService
             return $"CV_{Guid.NewGuid():N}";
         }
 
-        // Sin nombre el fichero queda con el puesto y un aviso. Es determinista a propósito: dos
-        // ofertas del mismo puesto se sobrescriben, pero nunca se acumulan CV sin identificar.
         if (string.IsNullOrWhiteSpace(namePart))
         {
             _logger.LogWarning(
@@ -187,11 +164,6 @@ public class CvCompilerService
         return SanitizeFileName(template.Replace("{job}", jobPart).Replace("{name}", namePart), 90);
     }
 
-    /// <summary>
-    /// Rellena el CV con los datos del bloque de anclas del perfil (empresa, fechas, stack, enlace
-    /// y descripción) para que no dependan de lo que conteste Gemini. Los proyectos que no estén
-    /// en el perfil se quitan. Si no hay anclas, el documento se deja como viene.
-    /// </summary>
     private void ApplyAnchors(CvDocument cv, JobOffer job)
     {
         var anchors = _profile.Anchors;
@@ -230,11 +202,6 @@ public class CvCompilerService
         MergeProfileSection(cv, "idioma", anchors.Profile.Languages, "Idiomas", 3);
     }
 
-    /// <summary>
-    /// Asegura que habilidades, formación e idiomas estén aunque el modelo no los mencione. Si la
-    /// sección existe, solo se añaden las líneas cuya etiqueta falta; si no, se crea desde el perfil.
-    /// Es lo mismo que hace LocalCvBuilder, para que el CV sea igual de completo llegue de donde llegue.
-    /// </summary>
     private void MergeProfileSection(CvDocument cv, string headingNeedle, List<CvAnchorLine> lines, string heading, int priority)
     {
         if (lines.Count == 0) return;
@@ -257,13 +224,11 @@ public class CvCompilerService
         section.Items ??= new List<CvItem>();
         foreach (var line in existing)
         {
-            // Si la sección ya tiene la línea —con el nombre que puso el modelo— no se añade otra
             if (section.Items.Any(i => LabelsMatch(i.Label, line.Label))) continue;
             section.Items.Add(new CvItem { Label = line.Label, Text = line.Text });
         }
     }
 
-    /// <summary>Escoge cuántas viñetas lleva cada tipo de bloque.</summary>
     private int BulletLimit(string headingNeedle)
     {
         var value = headingNeedle switch
@@ -276,13 +241,6 @@ public class CvCompilerService
         return value > 0 ? value : MaxBulletsDefault;
     }
 
-    /// <summary>
-    /// El modelo a veces devuelve la misma sección repetida ("Experiencia Laboral" cuatro veces)
-    /// dejando las últimas sin contenido, y además las titula de mil maneras distintas
-    /// ("Experiencia", "Experiencia Profesional", "EXPERIENCIA LABORAL (EPAM)"). Por eso se agrupa
-    /// por concepto y no por texto: se queda con la primera del mismo concepto, le pone la cabecera
-    /// canónica y absorbe los bloques con contenido de las demás, descartando los vacíos.
-    /// </summary>
     private void CoalesceSections(CvDocument cv)
     {
         if (cv.Sections is null || cv.Sections.Count < 2) return;
@@ -317,8 +275,6 @@ public class CvCompilerService
                 section.Heading, target.Heading, useful.Count, (section.Items?.Count ?? 0) - useful.Count);
         }
 
-        // Las secciones de entradas y proyectos tienen que maquetarse como bloques; si el modelo
-        // las devolvió como lista de líneas, el texto se imprimiría sin viñetas ni empresa.
         foreach (var (needle, _, _) in SectionOrder.Where(s => s.Rank <= 1))
         {
             var section = kept.FirstOrDefault(s => ConceptOf(s.Heading ?? string.Empty)?.Needle == needle);
@@ -332,8 +288,6 @@ public class CvCompilerService
             }
         }
 
-        // Cabecera canónica para que "Experiencia Profesional" y "Experiencia Laboral" no salgan
-        // con dos títulos distintos aunque sean dos secciones distintas.
         foreach (var section in kept)
         {
             var canonical = ConceptOf(section.Heading ?? string.Empty)?.Heading;
@@ -346,7 +300,6 @@ public class CvCompilerService
         if (kept.Count != cv.Sections.Count) cv.Sections = kept;
     }
 
-    /// <summary>Concepto al que pertenece un título de sección, o null si no es uno de los conocidos.</summary>
     private static (string Needle, int Rank, string Heading)? ConceptOf(string heading)
     {
         var normalized = CandidateProfileProvider.Normalize(heading);
@@ -359,10 +312,6 @@ public class CvCompilerService
         return null;
     }
 
-    /// <summary>
-    /// Un bloque sirve si tiene algo escrito además del título. Un item que solo lleva "Desarrollador
-    /// Backend" y nada más es el patrón que deja el modelo cuando repite la sección, así que no cuenta.
-    /// </summary>
     private static bool ItemHasContent(CvItem item)
     {
         var written = new[] { item.Label, item.Text, item.Org, item.Dates, item.Stack, item.Url, item.UrlLabel }
@@ -371,14 +320,9 @@ public class CvCompilerService
         return written || item.Bullets?.Any(b => !string.IsNullOrWhiteSpace(b)) == true;
     }
 
-    /// <summary>Dos bloques son el mismo si dicen lo mismo del mismo sitio.</summary>
     private static bool SameBlock(CvItem left, CvItem right) =>
         TitlesMatch($"{left.Title} {left.Org}", $"{right.Title} {right.Org}");
 
-    /// <summary>
-    /// Fija el orden de las secciones. El modelo las devuelve en el orden que quiere, así que sin
-    /// esto un CV puede acabar con los idiomas arriba. La experiencia manda.
-    /// </summary>
     private void OrderSections(CvDocument cv)
     {
         if (cv.Sections is null || cv.Sections.Count < 2) return;
@@ -402,7 +346,6 @@ public class CvCompilerService
 
     private static int RankOf(CvSection section) => ConceptOf(section.Heading ?? string.Empty)?.Rank ?? 5;
 
-    /// <summary>Como FindSection pero para secciones de líneas, que no son kind = entries.</summary>
     private static CvSection? FindTextSection(List<CvSection> sections, string headingNeedle)
     {
         foreach (var section in sections)
@@ -429,10 +372,6 @@ public class CvCompilerService
         return null;
     }
 
-    /// <summary>
-    /// Deja la sección en el orden de las anclas. Si el modelo no trajo un bloque equivalente se
-    /// crea desde el ancla, así la experiencia y los proyectos del perfil salen siempre.
-    /// </summary>
     private void MergeAnchored(CvSection section, List<CvAnchorEntry> anchors, bool keepUnmatched, JobOffer job, int bulletLimit)
     {
         var leftover = new List<CvItem>(section.Items ?? new List<CvItem>());
@@ -440,9 +379,6 @@ public class CvCompilerService
 
         foreach (var anchor in anchors)
         {
-            // Solo se reutiliza el bloque del modelo si su título casa con el del perfil. Si no
-            // casa se crea uno nuevo desde el ancla, así no se arrastran las viñetas de otro
-            // proyecto a uno que no le corresponde
             var index = leftover.FindIndex(i => TitlesMatch(i.Title, anchor.Title));
             var item = index >= 0 ? leftover[index] : new CvItem();
             if (index >= 0) leftover.RemoveAt(index);
@@ -452,10 +388,6 @@ public class CvCompilerService
             if (string.IsNullOrWhiteSpace(item.Dates)) item.Dates = anchor.Dates;
             if (string.IsNullOrWhiteSpace(item.Stack)) item.Stack = anchor.Stack;
 
-            // El enlace es un dato del perfil, no del modelo: si hay ancla, su URL y su texto
-            // prevalecen siempre. Antes solo se aplicaba cuando el modelo no traia URL, y como
-            // este siempre trae una, el texto del perfil se descartaba y se imprimia el suyo,
-            // que llega inflado con el org y el stack pegados detras.
             if (!string.IsNullOrWhiteSpace(anchor.Url))
             {
                 item.Url = anchor.Url;
@@ -476,10 +408,6 @@ public class CvCompilerService
             string.Join(", ", merged.Select(i => $"{i.Title}: {(i.Bullets?.Count ?? 0)} viñetas, {(string.IsNullOrWhiteSpace(i.Url) ? "sin enlace" : "con enlace")}")));
     }
 
-    /// <summary>
-    /// Viñetas de un bloque. Se queda con las que traiga el modelo y, si no llegan al número
-    /// pedido, las completa con los puntos del perfil. El fallback solo se usa si no queda ninguna.
-    /// </summary>
     private List<string> BuildBullets(CvAnchorEntry anchor, CvItem item, JobOffer job, int limit)
     {
         var chosen = (item.Bullets ?? new List<string>())
@@ -502,15 +430,11 @@ public class CvCompilerService
         return chosen.Take(limit > 0 ? limit : chosen.Count).ToList();
     }
 
-    /// <summary>
-    /// Elige del fondo de puntos los que mejor encajen con la oferta: puntúa cada uno por las
-    /// palabras que comparte con el título y la descripción y, a igualdad, se queda con el que va
-    /// antes en el perfil.
-    /// </summary>
     private static List<string> SelectPoints(List<string> pool, List<string> alreadyChosen, JobOffer job, int needed)
     {
         if (needed <= 0 || pool.Count == 0) return new List<string>();
 
+        // Puntúa cada punto del perfil por las palabras que comparte con la oferta y se queda con los mejores.
         var offer = CandidateProfileProvider.Normalize($"{job.Title} {job.Description}");
         var offerWords = SignificantWords(offer);
 
@@ -524,7 +448,6 @@ public class CvCompilerService
             .ToList();
     }
 
-    /// <summary>Número de palabras con contenido que comparten el punto y la oferta.</summary>
     private static double OverlapScore(string point, HashSet<string> offerWords)
     {
         if (offerWords.Count == 0) return 0;
@@ -535,24 +458,17 @@ public class CvCompilerService
 
         if (matched.Count == 0) return 0;
 
-        // Las palabras técnicas ("vertical", "informix", "cqrs") pesan más que las comunes ("cliente")
         var weight = matched.Sum(word => word.Length >= 6 ? 1.5 : word.Length >= 4 ? 1.0 : 0.5);
 
-        // Rompe los empates hacia delante: lo que más cuenta en un bloque va arriba
         return weight - point.Length / 10000.0;
     }
 
-    /// <summary>Palabras sin valor para comparar: artículos, preposiciones y palabras de oferta.</summary>
     private static HashSet<string> SignificantWords(string normalized) =>
         Regex.Matches(normalized, "[a-z0-9+#]{3,}")
             .Select(m => m.Value)
             .Where(word => !NoiseWords.Contains(word))
             .ToHashSet(StringComparer.Ordinal);
 
-    /// <summary>
-    /// Si dos frases cuentan lo mismo: una está dentro de la otra o comparten casi todo el texto.
-    /// Sirve para no repetir lo que el modelo ya escribió.
-    /// </summary>
     private static bool SaysSameThing(string left, string right)
     {
         var a = SignificantWords(CandidateProfileProvider.Normalize(left));
@@ -561,7 +477,6 @@ public class CvCompilerService
 
         var (small, big) = a.Count <= b.Count ? (a, b) : (b, a);
 
-        // Con menos de 4 palabras con contenido puede ser casualidad, así que no se compara
         if (small.Count < 4) return false;
 
         if (small.All(big.Contains)) return true;
@@ -570,7 +485,6 @@ public class CvCompilerService
         return shared / (double)small.Count >= 0.6;
     }
 
-    /// <summary>Palabras sin valor para comparar: artículos, preposiciones y jerga de oferta.</summary>
     private static readonly HashSet<string> NoiseWords = new(StringComparer.Ordinal)
     {
         "and", "api", "app", "anos", "base", "buscamos", "caso", "cliente", "clientes", "como",
@@ -584,11 +498,6 @@ public class CvCompilerService
         "trabajo", "trafico", "ultimo", "usted", "valor", "valores", "varios", "vez", "yo"
     };
 
-    /// <summary>
-    /// Compara títulos sin acentos, espacios ni signos. Deja que uno contenga al otro ("Nombre
-    /// (detalle)" casa con "Nombre"), pero pide cuatro caracteres mínimo para que palabras cortas
-    /// tipo "CV" no emparejen nada.
-    /// </summary>
     private static bool TitlesMatch(string? left, string? right)
     {
         var a = MatchKey(left);
@@ -602,14 +511,6 @@ public class CvCompilerService
                (a.Contains(b, StringComparison.Ordinal) || b.Contains(a, StringComparison.Ordinal));
     }
 
-    /// <summary>
-    /// Igual que TitlesMatch pero para las líneas de texto (formación, idiomas, habilidades), donde
-    /// el modelo escribe el nombre oficial completo y el perfil lo guarda abreviado: "Técnico
-    /// Superior en Animación 3D y Videojuegos" frente a "Técnico Superior en Animación 3D, Juegos y
-    /// Entornos Interactivos". Ahí la contención falla porque las dos cadenas divergen justo donde
-    /// una acaba y la otra sigue, así que se comparan las palabras con contenido: si comparten la
-    /// mayoría, son la misma línea y no se añade la del perfil por encima.
-    /// </summary>
     private static bool LabelsMatch(string? left, string? right) =>
         TitlesMatch(left, right) || SaysSameThing(left ?? string.Empty, right ?? string.Empty);
 
@@ -619,11 +520,6 @@ public class CvCompilerService
             .Select(char.ToLowerInvariant)
             .ToArray());
 
-    /// <summary>
-    /// Cuántas viñetas caben en un bloque. La experiencia es la última en recortarse y los
-    /// proyectos se quedan por debajo de su límite, así que al apretar sale antes información de
-    /// los proyectos que del trabajo.
-    /// </summary>
     private int BulletLimitFor(CvSection section, int maxBullets, int experienceBullets)
     {
         var heading = CandidateProfileProvider.Normalize(section.Heading ?? string.Empty);
@@ -643,10 +539,6 @@ public class CvCompilerService
         return maxBullets > 0 ? maxBullets : MaxBulletsDefault;
     }
 
-    /// <summary>
-    /// Describe lo que recorta un peldaño. Los cuatro primeros solo bajan el cuerpo de letra, y sin
-    /// esto el log parecía anunciar que se habían eliminado secciones cuando no se había quitado nada.
-    /// </summary>
     private static string DescribeTrim(int dropPriorityAtOrAbove, int maxBullets, int experienceBullets)
     {
         var parts = new List<string>
@@ -658,7 +550,6 @@ public class CvCompilerService
 
         if (maxBullets > 0) parts.Add($"máximo {maxBullets} viñetas en proyectos y habilidades");
 
-        // El primer peldaño deja la experiencia en MaxBulletsDefault; solo se avisa cuando baja
         if (experienceBullets > 0 && experienceBullets < MaxBulletsDefault)
         {
             parts.Add($"{experienceBullets} viñetas en la experiencia");
@@ -723,14 +614,12 @@ public class CvCompilerService
         var candidate = _config.Candidate;
         var body = new StringBuilder();
 
-        // --- PERFIL PROFESIONAL ---
         if (!string.IsNullOrWhiteSpace(doc.Summary))
         {
             body.AppendLine("    #section-heading(\"Perfil Profesional\")");
             body.AppendLine("    #text(size: 1.02em)[" + PrepareText(doc.Summary, MaxSummaryChars) + "]");
         }
 
-        // --- SECCIONES GENERADAS POR GEMINI ---
         foreach (var section in sections)
         {
             body.AppendLine("    #section-heading(" + TypstString(PrepareText(section.Heading, MaxFieldChars)) + ")");
@@ -753,7 +642,6 @@ public class CvCompilerService
             body.AppendLine("    #v(0.25em)");
         }
 
-        // --- PIE DE PÁGINA (ciudad y disponibilidad vienen de la configuración) ---
         var footer = BuildFooterNote(candidate);
         if (!string.IsNullOrWhiteSpace(footer))
         {
@@ -790,7 +678,6 @@ public class CvCompilerService
               v(0.35em)
             }
 
-            // --- CABECERA ---
             {{BuildHeaderBlock(doc, candidate)}}
 
             #v(0.3em)
@@ -817,9 +704,6 @@ public class CvCompilerService
         var rightContent = dates;
         if (!string.IsNullOrWhiteSpace(item.Url))
         {
-            // El texto del perfil se imprime entero aunque sea largo: es el dato correcto y
-            // recortarlo dejaria "github.com/.../Pdf_Signer". El del modelo, que puede venir
-            // inflado con el stack pegado, si pasa por el limite de campo.
             var label = string.IsNullOrWhiteSpace(item.UrlLabel)
                 ? "github.com"
                 : item.FromProfile
@@ -896,11 +780,6 @@ public class CvCompilerService
         return "    #list(marker: [\\u{2022}], body-indent: 0.5em, " + content + ")";
     }
 
-    /// <summary>
-    /// Cabecera del CV. Se monta línea a línea porque el modelo devuelve a veces el titular vacío:
-    /// si se imprimiera el bloque entero quedaría una línea en blanco de 19pt y el contacto se
-    /// separaba del nombre sin motivo.
-    /// </summary>
     private static string BuildHeaderBlock(CvDocument doc, CandidateConfig candidate)
     {
         var lines = new List<string>();
@@ -962,7 +841,6 @@ public class CvCompilerService
         return string.Join(" \\u{00B7} ", parts);
     }
 
-    /// <summary>Escapa el texto para poder escribirlo como cadena en Typst.</summary>
     private static string TypstString(string value) => "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
 
     private async Task<bool> CompileTypstAsync(string typstFile, string pdfFile, CancellationToken ct)
@@ -1079,11 +957,6 @@ public class CvCompilerService
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Limpia un texto para poder usarlo como nombre de fichero. Las tildes y la eñe se traducen
-    /// a ASCII porque los nombres con acentos fallan al compartir por correo o al subirlos a
-    /// sistemas de ficheros antiguos: "Adrián Espínola" se queda en "Adrian_Espinola".
-    /// </summary>
     private static string SanitizeFileName(string input, int maxLength)
     {
         var invalid = new string(Path.GetInvalidFileNameChars()) + " /\\:*?\"<>|.,&;";
@@ -1092,10 +965,6 @@ public class CvCompilerService
         return escaped.Length > maxLength ? escaped[..maxLength].Trim('_') : escaped;
     }
 
-    /// <summary>
-    /// Descompone los signos diacríticos y quita lo que no sea ASCII imprimible. Se hace en dos
-    /// pasos porque quitar primero los caracteres no ASCII deja la base ya separada de las tildes.
-    /// </summary>
     private static string ToAscii(string value)
     {
         var decomposed = value

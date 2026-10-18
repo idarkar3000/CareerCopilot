@@ -2,11 +2,6 @@ using CareerCopilot.Models;
 
 namespace CareerCopilot.Services;
 
-/// <summary>
-/// Monta el CV sin llamar a Gemini, para cuando no queda cuota. Reutiliza el texto fijo del bloque
-/// de anclas y deja experiencia y proyectos vacíos a propósito, para que los rellene el
-/// compilador igual que cuando el documento viene del modelo.
-/// </summary>
 public sealed class LocalCvBuilder
 {
     private readonly ILogger<LocalCvBuilder> _logger;
@@ -23,10 +18,6 @@ public sealed class LocalCvBuilder
         _profile = profile;
     }
 
-    /// <summary>
-    /// Construye el documento. Devuelve null si el perfil no trae el bloque "profile", porque sin
-    /// él solo se podría rellenar la experiencia y el CV saldría incompleto.
-    /// </summary>
     public EvaluationResult? Build(JobOffer job)
     {
         var anchors = _profile.Anchors;
@@ -44,7 +35,6 @@ public sealed class LocalCvBuilder
             Summary = anchors.Profile.Summary,
             Sections =
             [
-                // Vacías a propósito: ApplyAnchors las rellena con empresa, fechas, stack y viñetas
                 new CvSection { Heading = "Experiencia Laboral", Priority = 1, Kind = CvSectionKinds.Entries },
                 new CvSection { Heading = "Proyectos", Priority = 2, Kind = CvSectionKinds.Entries },
 

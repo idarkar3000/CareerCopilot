@@ -5,10 +5,6 @@ using CareerCopilot.Models;
 
 namespace CareerCopilot.Services;
 
-/// <summary>
-/// Carga el perfil del candidato desde prompts/profile.md y lo deja cacheado. Es lo que se envía
-/// en el prompt y contra lo que el guardarraíl valida el CV.
-/// </summary>
 public class CandidateProfileProvider
 {
     private readonly BotConfig _config;
@@ -26,7 +22,6 @@ public class CandidateProfileProvider
         _logger = logger;
     }
 
-    /// <summary>Perfil tal cual, para mandarlo en el prompt.</summary>
     public string Text
     {
         get
@@ -36,7 +31,6 @@ public class CandidateProfileProvider
         }
     }
 
-    /// <summary>De dónde salió el perfil, para verlo en el log.</summary>
     public string Source
     {
         get
@@ -46,7 +40,6 @@ public class CandidateProfileProvider
         }
     }
 
-    /// <summary>Pone en minúsculas y quita acentos para poder comparar palabras.</summary>
     public HashSet<string> NormalizedTokens
     {
         get
@@ -56,10 +49,6 @@ public class CandidateProfileProvider
         }
     }
 
-    /// <summary>
-    /// Datos fijos del bloque cv-anchors del perfil. El compilador los usa para rellenar empresa,
-    /// fechas, stack, enlace y descripción de la experiencia y los proyectos.
-    /// </summary>
     public CvAnchors Anchors
     {
         get
@@ -69,7 +58,6 @@ public class CandidateProfileProvider
         }
     }
 
-    /// <summary>Si el token normalizado aparece en el perfil.</summary>
     public bool ProfileMentions(string token)
     {
         var normalized = Normalize(token);
@@ -151,10 +139,6 @@ public class CandidateProfileProvider
 
     private const string AnchorMarker = "<!-- cv-anchors -->";
 
-    /// <summary>
-    /// Lee el JSON del bloque cv-anchors. Si no está o está mal formado avisa por log y devuelve
-    /// anclas vacías, para que el CV se siga generando con lo que conteste Gemini.
-    /// </summary>
     private CvAnchors ParseAnchors(string text)
     {
         var empty = new CvAnchors();
@@ -176,11 +160,12 @@ public class CandidateProfileProvider
             return empty;
         }
 
-        // Se cuentan las llaves para saber dónde acaba el JSON
         var depth = 0;
         var end = -1;
         var inString = false;
         var escaped = false;
+
+        // Recorre el texto contando llaves (ignorando las que van dentro de comillas) para sacar el JSON completo.
         for (var i = start; i < text.Length; i++)
         {
             var c = text[i];
@@ -231,10 +216,6 @@ public class CandidateProfileProvider
         anchors.Projects.RemoveAll(e => string.IsNullOrWhiteSpace(e.Title));
     }
 
-    /// <summary>
-    /// Palabras del perfil ya normalizadas. Usa el mismo patrón que el guardarraíl, así que
-    /// "CSS3/SASS" sale como "css3" y "sass".
-    /// </summary>
     private static HashSet<string> BuildTokens(string text)
     {
         var tokens = new HashSet<string>(StringComparer.Ordinal);
