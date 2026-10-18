@@ -654,7 +654,7 @@ public class CvCompilerService
         return $$"""
             #set page(
               paper: "a4",
-              margin: (top: 1.5cm, bottom: 1.0cm, left: 1.4cm, right: 1.4cm)
+              margin: (top: 1.8cm, bottom: 1.0cm, left: 1.4cm, right: 1.4cm)
             )
 
             #set text(
@@ -671,7 +671,9 @@ public class CvCompilerService
             #let muted = rgb("#475569")
 
             #let section-heading(title) = {
-              v(0.7em)
+              // 0.45em en vez de 0.7em: con seis secciones eso son ~1.5em de espacio muerto que
+              // ahora financia el margen superior sin empujar el cuerpo hacia abajo
+              v(0.45em)
               text(1.12em, weight: "bold", fill: primary, upper(title))
               v(-0.3em)
               line(length: 100%, stroke: 0.6pt + rgb("#cbd5e1"))
