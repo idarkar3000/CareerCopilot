@@ -1,33 +1,35 @@
-﻿using CareerCopilot;
+﻿using CareerCopilot.Endpoints;
 using CareerCopilot.Models;
+using CareerCopilot.Repositories;
 using CareerCopilot.Services;
+using CareerCopilot.Workers;
 
 var builder = WebApplication.CreateBuilder(args);
 
 var botConfig = builder.Configuration.GetSection("BotConfig").Get<BotConfig>() ?? new BotConfig();
 
 builder.Services.AddSingleton(botConfig);
-builder.Services.AddSingleton<JobDatabase>();
-builder.Services.AddSingleton<CandidateProfileProvider>();
-builder.Services.AddSingleton<CvSanitizer>();
-builder.Services.AddHttpClient<JobScraperService>();
-builder.Services.AddHttpClient<GeminiScorerService>(client =>
+builder.Services.AddSingleton<IJobRepository, SqliteJobRepository>();
+builder.Services.AddSingleton<ICandidateProfileProvider, CandidateProfileProvider>();
+builder.Services.AddSingleton<ICvSanitizer, CvSanitizer>();
+builder.Services.AddHttpClient<IJobScraperService, JobScraperService>();
+builder.Services.AddHttpClient<IGeminiScorerService, GeminiScorerService>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(Math.Clamp(botConfig.GeminiTimeoutSeconds, 5, 90));
 });
-builder.Services.AddSingleton<CvCompilerService>();
-builder.Services.AddSingleton<LocalCvBuilder>();
+builder.Services.AddSingleton<ICvCompilerService, CvCompilerService>();
+builder.Services.AddSingleton<ILocalCvBuilder, LocalCvBuilder>();
 
-builder.Services.AddSingleton<Worker>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<Worker>());
+builder.Services.AddSingleton<CareerCopilotWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<CareerCopilotWorker>());
 
-builder.Services.AddSingleton<TelegramNotifierService>(sp =>
+builder.Services.AddSingleton<ITelegramNotifierService>(sp =>
 {
     var config = sp.GetRequiredService<BotConfig>();
-    var db = sp.GetRequiredService<JobDatabase>();
+    var db = sp.GetRequiredService<IJobRepository>();
     var logger = sp.GetRequiredService<ILogger<TelegramNotifierService>>();
-    var scorer = sp.GetRequiredService<GeminiScorerService>();
-    var cvCompiler = sp.GetRequiredService<CvCompilerService>();
+    var scorer = sp.GetRequiredService<IGeminiScorerService>();
+    var cvCompiler = sp.GetRequiredService<ICvCompilerService>();
 
     return new TelegramNotifierService(
         config,
@@ -35,21 +37,14 @@ builder.Services.AddSingleton<TelegramNotifierService>(sp =>
         logger,
         scorer,
         cvCompiler,
-        () => sp.GetRequiredService<Worker>());
+        () => sp.GetRequiredService<CareerCopilotWorker>());
 });
 
 var app = builder.Build();
 
 WarnMissingCandidateSettings(app.Logger, botConfig);
 
-app.MapMethods("/", new[] { "GET", "HEAD" }, () => Results.Ok(new
-{
-    status = "Healthy",
-    service = "CareerCopilot",
-    timestamp = DateTime.UtcNow
-}));
-
-app.MapMethods("/health", new[] { "GET", "HEAD" }, () => Results.Ok("OK"));
+app.MapHealthEndpoints();
 
 app.Run();
 
@@ -89,20 +84,20 @@ static void WarnMissingCandidateSettings(ILogger logger, BotConfig config)
     if (links.Count == 0)
     {
         logger.LogInformation(
-            "No hay enlaces en BotConfig__Candidate__Links__*: la cabecera saldrÃ¡ sin GitHub ni LinkedIn. Se pueden aÃ±adir con Links__0__Label y Links__0__Url.");
+            "No hay enlaces en BotConfig__Candidate__Links__*: la cabecera saldrá sin GitHub ni LinkedIn. Se pueden añadir con Links__0__Label y Links__0__Url.");
     }
 
     if (requiredMissing.Count > 0)
     {
         logger.LogError(
-            "Faltan datos obligatorios del candidato: {Vars}. Sin ellos la cabecera del CV va en blanco y el PDF se nombra solo con el puesto. CrÃ©alas en el panel de Render.",
+            "Faltan datos obligatorios del candidato: {Vars}. Sin ellos la cabecera del CV va en blanco y el PDF se nombra solo con el puesto. Créalas en el panel de Render.",
             string.Join(", ", requiredMissing));
     }
 
     if (optionalMissing.Count > 0)
     {
         logger.LogWarning(
-            "Datos del candidato sin rellenar (la cabecera saldrÃ¡ incompleta): {Vars}",
+            "Datos del candidato sin rellenar (la cabecera saldrá incompleta): {Vars}",
             string.Join(", ", optionalMissing));
     }
 }

@@ -1,0 +1,13 @@
+# Normalize line endings on checkout/commit
+* text=auto
+
+*.cs     text diff=csharp
+*.csproj text
+*.slnx   text
+*.json   text
+*.md     text
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary

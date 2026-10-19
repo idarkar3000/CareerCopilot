@@ -1,0 +1,15 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/*.user
+
+**/appsettings.json
+**/appsettings.Development.json
+**/.env
+
+**/jobs.db
+**/jobs.db-shm
+**/jobs.db-wal
+**/GeneratedCVs/
+**/prompts/profile.md

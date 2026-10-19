@@ -1,77 +1,78 @@
 using CareerCopilot.Models;
 
-namespace CareerCopilot.Services;
-
-public sealed class LocalCvBuilder
+namespace CareerCopilot.Services
 {
-    private readonly ILogger<LocalCvBuilder> _logger;
-    private readonly BotConfig _config;
-    private readonly CandidateProfileProvider _profile;
-
-    public LocalCvBuilder(
-        ILogger<LocalCvBuilder> logger,
-        BotConfig config,
-        CandidateProfileProvider profile)
+    public sealed class LocalCvBuilder : ILocalCvBuilder
     {
-        _logger = logger;
-        _config = config;
-        _profile = profile;
-    }
+        private readonly ILogger<LocalCvBuilder> _logger;
+        private readonly BotConfig _config;
+        private readonly ICandidateProfileProvider _profile;
 
-    public EvaluationResult? Build(JobOffer job)
-    {
-        var anchors = _profile.Anchors;
-        if (anchors.Profile.IsEmpty)
+        public LocalCvBuilder(
+            ILogger<LocalCvBuilder> logger,
+            BotConfig config,
+            ICandidateProfileProvider profile)
         {
-            _logger.LogError(
-                "El perfil no trae el bloque 'profile' (summary, skills, education, languages); no se puede generar el CV local de '{Title}'.",
-                job.Title);
-            return null;
+            _logger = logger;
+            _config = config;
+            _profile = profile;
         }
 
-        var document = new CvDocument
+        public EvaluationResult? Build(JobOffer job)
         {
-            Headline = _config.Candidate.Headline,
-            Summary = anchors.Profile.Summary,
-            Sections =
-            [
-                new CvSection { Heading = "Experiencia Laboral", Priority = 1, Kind = CvSectionKinds.Entries },
-                new CvSection { Heading = "Proyectos", Priority = 2, Kind = CvSectionKinds.Entries },
+            var anchors = _profile.Anchors;
+            if (anchors.Profile.IsEmpty)
+            {
+                _logger.LogError(
+                    "El perfil no trae el bloque 'profile' (summary, skills, education, languages); no se puede generar el CV local de '{Title}'.",
+                    job.Title);
+                return null;
+            }
 
-                new CvSection
-                {
-                    Heading = "Habilidades Técnicas",
-                    Priority = 1,
-                    Kind = CvSectionKinds.Texts,
-                    Items = ToItems(anchors.Profile.Skills)
-                },
-                new CvSection
-                {
-                    Heading = "Formación Académica",
-                    Priority = 2,
-                    Kind = CvSectionKinds.Texts,
-                    Items = ToItems(anchors.Profile.Education)
-                },
-                new CvSection
-                {
-                    Heading = "Idiomas",
-                    Priority = 3,
-                    Kind = CvSectionKinds.Texts,
-                    Items = ToItems(anchors.Profile.Languages)
-                }
-            ]
-        };
+            var document = new CvDocument
+            {
+                Headline = _config.Candidate.Headline,
+                Summary = anchors.Profile.Summary,
+                Sections =
+                [
+                    new CvSection { Heading = "Experiencia Laboral", Priority = 1, Kind = CvSectionKinds.Entries },
+                    new CvSection { Heading = "Proyectos", Priority = 2, Kind = CvSectionKinds.Entries },
 
-        _logger.LogInformation(
-            "CV local montado para '{Title}': {Skills} habilidades, {Education} titulaciones, {Languages} idiomas.",
-            job.Title, anchors.Profile.Skills.Count, anchors.Profile.Education.Count, anchors.Profile.Languages.Count);
+                    new CvSection
+                    {
+                        Heading = "Habilidades Técnicas",
+                        Priority = 1,
+                        Kind = CvSectionKinds.Texts,
+                        Items = ToItems(anchors.Profile.Skills)
+                    },
+                    new CvSection
+                    {
+                        Heading = "Formación Académica",
+                        Priority = 2,
+                        Kind = CvSectionKinds.Texts,
+                        Items = ToItems(anchors.Profile.Education)
+                    },
+                    new CvSection
+                    {
+                        Heading = "Idiomas",
+                        Priority = 3,
+                        Kind = CvSectionKinds.Texts,
+                        Items = ToItems(anchors.Profile.Languages)
+                    }
+                ]
+            };
 
-        return new EvaluationResult { Cv = document, IsLocal = true };
+            _logger.LogInformation(
+                "CV local montado para '{Title}': {Skills} habilidades, {Education} titulaciones, {Languages} idiomas.",
+                job.Title, anchors.Profile.Skills.Count, anchors.Profile.Education.Count, anchors.Profile.Languages.Count);
+
+            return new EvaluationResult { Cv = document, IsLocal = true };
+        }
+
+        private static List<CvItem> ToItems(List<CvAnchorLine> lines) =>
+            lines
+                .Where(l => !string.IsNullOrWhiteSpace(l.Label) && !string.IsNullOrWhiteSpace(l.Text))
+                .Select(l => new CvItem { Label = l.Label, Text = l.Text })
+                .ToList();
     }
-
-    private static List<CvItem> ToItems(List<CvAnchorLine> lines) =>
-        lines
-            .Where(l => !string.IsNullOrWhiteSpace(l.Label) && !string.IsNullOrWhiteSpace(l.Text))
-            .Select(l => new CvItem { Label = l.Label, Text = l.Text })
-            .ToList();
 }

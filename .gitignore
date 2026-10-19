@@ -1,21 +1,40 @@
+## Build and compile outputs
 bin/
 obj/
+[Bb]in/
+[Oo]bj/
 *.user
 *.suo
 .vs/
 .vscode/
 
+## Environment variables and secrets
+.env
+*.env
+*.env.*
+!.env.example
+
+## Local SQLite database
 jobs.db
 jobs.db-journal
 jobs.db-shm
 jobs.db-wal
+*.db
+*.sqlite
+*.sqlite3
+
+## Generated CVs and Typst templates
 GeneratedCVs/
 *.pdf
 *.typ
 
+## Logs
+logs/
+**/logs/
+*.log
+
 appsettings.json
 appsettings.Development.json
-.env
 
 CareerCopilot/prompts/profile.md
 

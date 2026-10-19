@@ -1,448 +1,70 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using CareerCopilot.Models;
 using Microsoft.Extensions.Configuration;
 
-namespace CareerCopilot.Services;
-
-public class JobScraperService
+namespace CareerCopilot.Services
 {
-    private readonly HttpClient _http;
-    private readonly ILogger<JobScraperService> _logger;
-    private readonly BotConfig _config;
-    private readonly string? _adzunaAppId;
-    private readonly string? _adzunaAppKey;
-
-    public JobScraperService(HttpClient http, ILogger<JobScraperService> logger, IConfiguration configuration, BotConfig config)
+    public class JobScraperService : IJobScraperService
     {
-        _http = http;
-        _logger = logger;
-        _config = config;
+        private readonly HttpClient _http;
+        private readonly ILogger<JobScraperService> _logger;
+        private readonly BotConfig _config;
+        private readonly string? _adzunaAppId;
+        private readonly string? _adzunaAppKey;
 
-        _adzunaAppId = configuration["JobSources:Adzuna:AppId"];
-        _adzunaAppKey = configuration["JobSources:Adzuna:AppKey"];
-    }
-
-    public async Task<List<JobOffer>> FetchTecnoEmpleoJobsAsync(string query, CancellationToken ct)
-    {
-        var list = new List<JobOffer>();
-        var url = $"https://www.tecnoempleo.com/ofertas-trabajo/?te={Uri.EscapeDataString(query)}";
-
-        try
+        public JobScraperService(HttpClient http, ILogger<JobScraperService> logger, IConfiguration configuration, BotConfig config)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
-            req.Headers.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            _http = http;
+            _logger = logger;
+            _config = config;
 
-            var response = await _http.SendAsync(req, ct);
-            if (!response.IsSuccessStatusCode) return list;
-
-            var html = await response.Content.ReadAsStringAsync(ct);
-
-            var matches = Regex.Matches(html, @"href=""(https://www\.tecnoempleo\.com/[^""]*?rf-[a-z0-9\-]+)""[^>]*?>([^<]+)</a>", RegexOptions.IgnoreCase);
-
-            foreach (Match m in matches)
-            {
-                var offerUrl = m.Groups[1].Value.Trim();
-                var title = CleanHtml(m.Groups[2].Value);
-
-                if (string.IsNullOrWhiteSpace(title) || title.Length < 4 || title.Contains("ofertas de empleo", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var idMatch = Regex.Match(offerUrl, @"rf-([a-z0-9\-]+)", RegexOptions.IgnoreCase);
-                var id = idMatch.Success ? "te_" + idMatch.Groups[1].Value : "te_" + Math.Abs(offerUrl.GetHashCode()).ToString();
-
-                var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
-                               title.Contains("teletrabajo", StringComparison.OrdinalIgnoreCase);
-
-                if (list.All(x => x.Id != id))
-                {
-                    list.Add(new JobOffer(
-                        id,
-                        title,
-                        "Empresa Tecnoempleo",
-                        offerUrl,
-                        $"{title} en Tecnoempleo",
-                        DateTime.UtcNow,
-                        Province: string.Empty,
-                        City: string.Empty,
-                        IsRemote: isRemote
-                    ));
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Aviso consultando Tecnoempleo.");
+            _adzunaAppId = configuration["JobSources:Adzuna:AppId"];
+            _adzunaAppKey = configuration["JobSources:Adzuna:AppKey"];
         }
 
-        return list;
-    }
-
-    public async Task<List<JobOffer>> FetchLinkedInJobsAsync(string query, CancellationToken ct)
-    {
-        var list = new List<JobOffer>();
-        var url = $"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={Uri.EscapeDataString(query)}&location=Spain&f_TPR=r604800";
-
-        try
+        public async Task<List<JobOffer>> FetchTecnoEmpleoJobsAsync(string query, CancellationToken ct)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
-
-            var response = await _http.SendAsync(req, ct);
-            if (!response.IsSuccessStatusCode) return list;
-
-            var html = await response.Content.ReadAsStringAsync(ct);
-            var cardMatches = Regex.Matches(html, @"<li[\s\S]*?</li>");
-
-            foreach (Match card in cardMatches)
-            {
-                var snippet = card.Value;
-
-                var titleMatch = Regex.Match(snippet, @"(?:base-search-card__title|job-search-card__title)[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
-                if (!titleMatch.Success)
-                    titleMatch = Regex.Match(snippet, @"<h3[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
-
-                var companyMatch = Regex.Match(snippet, @"(?:base-search-card__subtitle|job-search-card__subtitle)[\s\S]*?<a[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
-                if (!companyMatch.Success)
-                    companyMatch = Regex.Match(snippet, @"(?:base-search-card__subtitle|job-search-card__subtitle)[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
-
-                var linkMatch = Regex.Match(snippet, @"href=""(https://[a-z]{2,3}\.linkedin\.com/jobs/view/[^""\?]+)", RegexOptions.IgnoreCase);
-                if (!linkMatch.Success)
-                    linkMatch = Regex.Match(snippet, @"href=""([^""]*linkedin\.com/jobs/view/[^""]*)""", RegexOptions.IgnoreCase);
-
-                var locationMatch = Regex.Match(snippet, @"job-search-card__location[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
-
-                if (titleMatch.Success && linkMatch.Success)
-                {
-                    var title = titleMatch.Groups[1].Value.Trim();
-                    var company = companyMatch.Success ? companyMatch.Groups[1].Value.Trim() : "Empresa en LinkedIn";
-                    var rawLink = linkMatch.Groups[1].Value.Trim();
-                    var location = locationMatch.Success ? locationMatch.Groups[1].Value.Trim() : string.Empty;
-
-                    var idMatch = Regex.Match(rawLink, @"(\d{8,})");
-                    var id = idMatch.Success ? idMatch.Value : Math.Abs(rawLink.GetHashCode()).ToString();
-                    var finalUrl = $"https://es.linkedin.com/jobs/view/{id}";
-
-                    var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
-                                   location.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
-                                   location.Contains("remote", StringComparison.OrdinalIgnoreCase);
-
-                    list.Add(new JobOffer(
-                        "li_" + id,
-                        title,
-                        company,
-                        finalUrl,
-                        $"{title} en {company} ({location})",
-                        DateTime.UtcNow,
-                        Province: location,
-                        City: location,
-                        IsRemote: isRemote
-                    ));
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error al consultar LinkedIn para '{Query}'.", query);
-        }
-
-        return list;
-    }
-
-    public async Task<List<JobOffer>> FetchRemotiveJobsAsync(CancellationToken ct)
-    {
-        var list = new List<JobOffer>();
-        var url = "https://remotive.com/api/remote-jobs?category=software-dev&limit=25";
-
-        try
-        {
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
-
-            var response = await _http.SendAsync(req, ct);
-            if (!response.IsSuccessStatusCode) return list;
-
-            var json = await response.Content.ReadAsStringAsync(ct);
-            using var doc = JsonDocument.Parse(json);
-
-            if (doc.RootElement.TryGetProperty("jobs", out var jobsElement))
-            {
-                foreach (var item in jobsElement.EnumerateArray())
-                {
-                    var title = item.GetProperty("title").GetString() ?? "";
-                    var company = item.GetProperty("company_name").GetString() ?? "Empresa Remota";
-                    var jobUrl = item.GetProperty("url").GetString() ?? "";
-                    var candidateLocations = item.TryGetProperty("candidate_required_location", out var loc) ? loc.GetString() ?? "" : "";
-
-                    var text = $"{title} {candidateLocations}".ToLowerInvariant();
-                    if ((text.Contains("c#") || text.Contains(".net") || text.Contains("backend")) &&
-                        (candidateLocations.Contains("Spain", StringComparison.OrdinalIgnoreCase) ||
-                         candidateLocations.Contains("Worldwide", StringComparison.OrdinalIgnoreCase) ||
-                         candidateLocations.Contains("Europe", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        var id = "rem_" + item.GetProperty("id").GetInt64();
-                        list.Add(new JobOffer(
-                            id,
-                            title,
-                            company,
-                            jobUrl,
-                            $"{title} en {company} ({candidateLocations})",
-                            DateTime.UtcNow,
-                            Province: string.Empty,
-                            City: candidateLocations,
-                            IsRemote: true
-                        ));
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Aviso consultando Remotive API.");
-        }
-
-        return list;
-    }
-
-    public async Task<List<JobOffer>> FetchAdzunaJobsAsync(string query, CancellationToken ct)
-    {
-        var list = new List<JobOffer>();
-
-        if (string.IsNullOrWhiteSpace(_adzunaAppId) || string.IsNullOrWhiteSpace(_adzunaAppKey))
-        {
-            _logger.LogWarning("Adzuna no está configurado (falta JobSources:Adzuna:AppId/AppKey en appsettings.json); se omite esta fuente.");
-            return list;
-        }
-
-        var url = "https://api.adzuna.com/v1/api/jobs/es/search/1" +
-                  $"?app_id={Uri.EscapeDataString(_adzunaAppId)}" +
-                  $"&app_key={Uri.EscapeDataString(_adzunaAppKey)}" +
-                  "&results_per_page=25" +
-                  $"&what={Uri.EscapeDataString(query)}" +
-                  "&content-type=application/json";
-
-        try
-        {
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
-
-            var response = await _http.SendAsync(req, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("Adzuna respondió {Status} para la búsqueda '{Query}'.", response.StatusCode, query);
-                return list;
-            }
-
-            var bytes = await response.Content.ReadAsByteArrayAsync(ct);
-            var json = Encoding.UTF8.GetString(bytes);
-
-            using var doc = JsonDocument.Parse(json);
-
-            if (!doc.RootElement.TryGetProperty("results", out var results))
-                return list;
-
-            foreach (var item in results.EnumerateArray())
-            {
-                var title = item.TryGetProperty("title", out var t) ? CleanHtml(t.GetString() ?? "") : "";
-                if (string.IsNullOrWhiteSpace(title)) continue;
-
-                var company = item.TryGetProperty("company", out var comp) && comp.TryGetProperty("display_name", out var compName)
-                    ? compName.GetString() ?? "Empresa en Adzuna"
-                    : "Empresa en Adzuna";
-
-                var jobUrl = item.TryGetProperty("redirect_url", out var u) ? u.GetString() ?? "" : "";
-                if (string.IsNullOrWhiteSpace(jobUrl)) continue;
-
-                var location = item.TryGetProperty("location", out var loc) && loc.TryGetProperty("display_name", out var locName)
-                    ? locName.GetString() ?? ""
-                    : "";
-
-                var id = item.TryGetProperty("id", out var idProp)
-                    ? "adz_" + idProp.GetString()
-                    : "adz_" + Math.Abs(jobUrl.GetHashCode());
-
-                var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
-                               location.Contains("remoto", StringComparison.OrdinalIgnoreCase);
-
-                if (list.All(x => x.Id != id))
-                {
-                    var summary = string.IsNullOrWhiteSpace(location)
-                        ? $"{title} en {company}"
-                        : $"{title} en {company} ({location})";
-
-                    list.Add(new JobOffer(
-                        id,
-                        title,
-                        company,
-                        jobUrl,
-                        summary,
-                        DateTime.UtcNow,
-                        Province: location,
-                        City: location,
-                        IsRemote: isRemote
-                    ));
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Aviso consultando Adzuna API para '{Query}'.", query);
-        }
-
-        return list;
-    }
-
-    public async Task<List<JobOffer>> FetchInfoJobsJobsAsync(string query, CancellationToken ct)
-    {
-        var list = new List<JobOffer>();
-
-        if (string.IsNullOrWhiteSpace(_config.InfoJobsClientId) || string.IsNullOrWhiteSpace(_config.InfoJobsClientSecret))
-        {
-            _logger.LogWarning("InfoJobs no está configurado (falta InfoJobsClientId/InfoJobsClientSecret en BotConfig); se omite esta fuente.");
-            return list;
-        }
-
-        var url = "https://api.infojobs.net/api/9/offer" +
-                  $"?q={Uri.EscapeDataString(query)}" +
-                  "&maxResults=25" +
-                  "&order=updated-desc";
-
-        try
-        {
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            var basicAuth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_config.InfoJobsClientId}:{_config.InfoJobsClientSecret}"));
-            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", basicAuth);
-            req.Headers.Accept.ParseAdd("application/json");
-            req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
-
-            var response = await _http.SendAsync(req, ct);
-            if (!response.IsSuccessStatusCode)
-            {
-                var body = await response.Content.ReadAsStringAsync(ct);
-                _logger.LogWarning("InfoJobs respondió {Status} para '{Query}': {Body}", response.StatusCode, query, body);
-                return list;
-            }
-
-            var json = await response.Content.ReadAsStringAsync(ct);
-            using var doc = JsonDocument.Parse(json);
-
-            if (!doc.RootElement.TryGetProperty("offers", out var offers))
-                return list;
-
-            foreach (var item in offers.EnumerateArray())
-            {
-                var title = item.TryGetProperty("title", out var t) ? CleanHtml(t.GetString() ?? "") : "";
-                if (string.IsNullOrWhiteSpace(title)) continue;
-
-                var company = item.TryGetProperty("author", out var author) && author.TryGetProperty("name", out var authorName)
-                    ? authorName.GetString() ?? "Empresa en InfoJobs"
-                    : "Empresa en InfoJobs";
-
-                var jobUrl = item.TryGetProperty("link", out var l) ? l.GetString() ?? "" : "";
-                if (string.IsNullOrWhiteSpace(jobUrl)) continue;
-
-                var descriptionSnippet = item.TryGetProperty("requirementMin", out var reqMin)
-                    ? CleanHtml(reqMin.GetString() ?? "")
-                    : title;
-
-                var province = item.TryGetProperty("province", out var prov) && prov.TryGetProperty("value", out var provVal)
-                    ? provVal.GetString() ?? ""
-                    : "";
-
-                var city = item.TryGetProperty("city", out var cProp) ? cProp.GetString() ?? "" : "";
-
-                var teleworking = item.TryGetProperty("teleworking", out var tw) && tw.TryGetProperty("value", out var twVal)
-                    ? twVal.GetString() ?? ""
-                    : "";
-
-                var isRemote = teleworking.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
-                               teleworking.Contains("teletrabajo", StringComparison.OrdinalIgnoreCase) ||
-                               title.Contains("remoto", StringComparison.OrdinalIgnoreCase);
-
-                var id = item.TryGetProperty("id", out var idProp)
-                    ? "ij_" + idProp.GetString()
-                    : "ij_" + Math.Abs(jobUrl.GetHashCode());
-
-                if (list.All(x => x.Id != id))
-                {
-                    list.Add(new JobOffer(
-                        id,
-                        title,
-                        company,
-                        jobUrl,
-                        $"{title} en {company}. {descriptionSnippet}",
-                        DateTime.UtcNow,
-                        Province: province,
-                        City: city,
-                        IsRemote: isRemote
-                    ));
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Aviso consultando InfoJobs API para '{Query}'.", query);
-        }
-
-        return list;
-    }
-
-    public async Task<List<JobOffer>> FetchGenericFeedsAsync(CancellationToken ct)
-    {
-        var list = new List<JobOffer>();
-
-        foreach (var feedUrl in _config.Feeds ?? new List<string>())
-        {
-            if (ct.IsCancellationRequested) break;
-            if (string.IsNullOrWhiteSpace(feedUrl)) continue;
+            var list = new List<JobOffer>();
+            var url = $"https://www.tecnoempleo.com/ofertas-trabajo/?te={Uri.EscapeDataString(query)}";
 
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Get, feedUrl);
-                req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+                req.Headers.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
 
                 var response = await _http.SendAsync(req, ct);
-                if (!response.IsSuccessStatusCode)
+                if (!response.IsSuccessStatusCode) return list;
+
+                var html = await response.Content.ReadAsStringAsync(ct);
+
+                var matches = Regex.Matches(html, @"href=""(https://www\.tecnoempleo\.com/[^""]*?rf-[a-z0-9\-]+)""[^>]*?>([^<]+)</a>", RegexOptions.IgnoreCase);
+
+                foreach (Match m in matches)
                 {
-                    _logger.LogWarning("Feed '{Url}' respondió {Status}.", feedUrl, response.StatusCode);
-                    continue;
-                }
+                    var offerUrl = m.Groups[1].Value.Trim();
+                    var title = CleanHtml(m.Groups[2].Value);
 
-                var xml = await response.Content.ReadAsStringAsync(ct);
-                var xdoc = XDocument.Parse(xml);
+                    if (string.IsNullOrWhiteSpace(title) || title.Length < 4 || title.Contains("ofertas de empleo", StringComparison.OrdinalIgnoreCase))
+                        continue;
 
-                var items = xdoc.Descendants().Where(e => e.Name.LocalName is "item" or "entry");
-
-                foreach (var item in items)
-                {
-                    var title = CleanHtml(item.Elements().FirstOrDefault(e => e.Name.LocalName == "title")?.Value ?? "");
-                    if (string.IsNullOrWhiteSpace(title)) continue;
-
-                    var linkEl = item.Elements().FirstOrDefault(e => e.Name.LocalName == "link");
-                    var link = linkEl?.Attribute("href")?.Value ?? linkEl?.Value ?? "";
-                    if (string.IsNullOrWhiteSpace(link)) continue;
-
-                    var description = CleanHtml(
-                        item.Elements().FirstOrDefault(e => e.Name.LocalName is "description" or "summary" or "content")?.Value
-                        ?? title);
-
-                    var id = "feed_" + Math.Abs((feedUrl + link).GetHashCode());
+                    var idMatch = Regex.Match(offerUrl, @"rf-([a-z0-9\-]+)", RegexOptions.IgnoreCase);
+                    var id = idMatch.Success ? "te_" + idMatch.Groups[1].Value : "te_" + Math.Abs(offerUrl.GetHashCode()).ToString();
 
                     var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
-                                   description.Contains("remoto", StringComparison.OrdinalIgnoreCase);
+                                   title.Contains("teletrabajo", StringComparison.OrdinalIgnoreCase);
 
                     if (list.All(x => x.Id != id))
                     {
-                        var sourceHost = Uri.TryCreate(feedUrl, UriKind.Absolute, out var feedUri) ? feedUri.Host : "Feed";
                         list.Add(new JobOffer(
                             id,
                             title,
-                            sourceHost,
-                            link,
-                            description,
+                            "Empresa Tecnoempleo",
+                            offerUrl,
+                            $"{title} en Tecnoempleo",
                             DateTime.UtcNow,
                             Province: string.Empty,
                             City: string.Empty,
@@ -453,15 +75,394 @@ public class JobScraperService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Aviso consultando el feed '{Url}'.", feedUrl);
+                _logger.LogWarning(ex, "Aviso consultando Tecnoempleo.");
             }
+
+            return list;
         }
 
-        return list;
-    }
+        public async Task<List<JobOffer>> FetchLinkedInJobsAsync(string query, CancellationToken ct)
+        {
+            var list = new List<JobOffer>();
+            var url = $"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={Uri.EscapeDataString(query)}&location=Spain&f_TPR=r604800";
 
-    private static string CleanHtml(string input)
-    {
-        return Regex.Replace(input, @"<[^>]+>|&nbsp;", " ").Trim();
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+
+                var response = await _http.SendAsync(req, ct);
+                if (!response.IsSuccessStatusCode) return list;
+
+                var html = await response.Content.ReadAsStringAsync(ct);
+                var cardMatches = Regex.Matches(html, @"<li[\s\S]*?</li>");
+
+                foreach (Match card in cardMatches)
+                {
+                    var snippet = card.Value;
+
+                    var titleMatch = Regex.Match(snippet, @"(?:base-search-card__title|job-search-card__title)[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
+                    if (!titleMatch.Success)
+                        titleMatch = Regex.Match(snippet, @"<h3[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
+
+                    var companyMatch = Regex.Match(snippet, @"(?:base-search-card__subtitle|job-search-card__subtitle)[\s\S]*?<a[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
+                    if (!companyMatch.Success)
+                        companyMatch = Regex.Match(snippet, @"(?:base-search-card__subtitle|job-search-card__subtitle)[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
+
+                    var linkMatch = Regex.Match(snippet, @"href=""(https://[a-z]{2,3}\.linkedin\.com/jobs/view/[^""\?]+)", RegexOptions.IgnoreCase);
+                    if (!linkMatch.Success)
+                        linkMatch = Regex.Match(snippet, @"href=""([^""]*linkedin\.com/jobs/view/[^""]*)""", RegexOptions.IgnoreCase);
+
+                    var locationMatch = Regex.Match(snippet, @"job-search-card__location[^>]*>\s*([^<\r\n]+)", RegexOptions.IgnoreCase);
+
+                    if (titleMatch.Success && linkMatch.Success)
+                    {
+                        var title = titleMatch.Groups[1].Value.Trim();
+                        var company = companyMatch.Success ? companyMatch.Groups[1].Value.Trim() : "Empresa en LinkedIn";
+                        var rawLink = linkMatch.Groups[1].Value.Trim();
+                        var location = locationMatch.Success ? locationMatch.Groups[1].Value.Trim() : string.Empty;
+
+                        var idMatch = Regex.Match(rawLink, @"(\d{8,})");
+                        var id = idMatch.Success ? idMatch.Value : Math.Abs(rawLink.GetHashCode()).ToString();
+                        var finalUrl = $"https://es.linkedin.com/jobs/view/{id}";
+
+                        var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                                       location.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                                       location.Contains("remote", StringComparison.OrdinalIgnoreCase);
+
+                        list.Add(new JobOffer(
+                            "li_" + id,
+                            title,
+                            company,
+                            finalUrl,
+                            $"{title} en {company} ({location})",
+                            DateTime.UtcNow,
+                            Province: location,
+                            City: location,
+                            IsRemote: isRemote
+                        ));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error al consultar LinkedIn para '{Query}'.", query);
+            }
+
+            return list;
+        }
+
+        public async Task<List<JobOffer>> FetchRemotiveJobsAsync(CancellationToken ct)
+        {
+            var list = new List<JobOffer>();
+            var url = "https://remotive.com/api/remote-jobs?category=software-dev&limit=25";
+
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
+
+                var response = await _http.SendAsync(req, ct);
+                if (!response.IsSuccessStatusCode) return list;
+
+                var json = await response.Content.ReadAsStringAsync(ct);
+                using var doc = JsonDocument.Parse(json);
+
+                if (doc.RootElement.TryGetProperty("jobs", out var jobsElement))
+                {
+                    foreach (var item in jobsElement.EnumerateArray())
+                    {
+                        var title = item.GetProperty("title").GetString() ?? "";
+                        var company = item.GetProperty("company_name").GetString() ?? "Empresa Remota";
+                        var jobUrl = item.GetProperty("url").GetString() ?? "";
+                        var candidateLocations = item.TryGetProperty("candidate_required_location", out var loc) ? loc.GetString() ?? "" : "";
+
+                        var text = $"{title} {candidateLocations}".ToLowerInvariant();
+                        if ((text.Contains("c#") || text.Contains(".net") || text.Contains("backend")) &&
+                            (candidateLocations.Contains("Spain", StringComparison.OrdinalIgnoreCase) ||
+                             candidateLocations.Contains("Worldwide", StringComparison.OrdinalIgnoreCase) ||
+                             candidateLocations.Contains("Europe", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            var id = "rem_" + item.GetProperty("id").GetInt64();
+                            list.Add(new JobOffer(
+                                id,
+                                title,
+                                company,
+                                jobUrl,
+                                $"{title} en {company} ({candidateLocations})",
+                                DateTime.UtcNow,
+                                Province: string.Empty,
+                                City: candidateLocations,
+                                IsRemote: true
+                            ));
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Aviso consultando Remotive API.");
+            }
+
+            return list;
+        }
+
+        public async Task<List<JobOffer>> FetchAdzunaJobsAsync(string query, CancellationToken ct)
+        {
+            var list = new List<JobOffer>();
+
+            if (string.IsNullOrWhiteSpace(_adzunaAppId) || string.IsNullOrWhiteSpace(_adzunaAppKey))
+            {
+                _logger.LogWarning("Adzuna no está configurado (falta JobSources:Adzuna:AppId/AppKey en appsettings.json); se omite esta fuente.");
+                return list;
+            }
+
+            var url = "https://api.adzuna.com/v1/api/jobs/es/search/1" +
+                      $"?app_id={Uri.EscapeDataString(_adzunaAppId)}" +
+                      $"&app_key={Uri.EscapeDataString(_adzunaAppKey)}" +
+                      "&results_per_page=25" +
+                      $"&what={Uri.EscapeDataString(query)}" +
+                      "&content-type=application/json";
+
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
+
+                var response = await _http.SendAsync(req, ct);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Adzuna respondió {Status} para la búsqueda '{Query}'.", response.StatusCode, query);
+                    return list;
+                }
+
+                var bytes = await response.Content.ReadAsByteArrayAsync(ct);
+                var json = Encoding.UTF8.GetString(bytes);
+
+                using var doc = JsonDocument.Parse(json);
+
+                if (!doc.RootElement.TryGetProperty("results", out var results))
+                    return list;
+
+                foreach (var item in results.EnumerateArray())
+                {
+                    var title = item.TryGetProperty("title", out var t) ? CleanHtml(t.GetString() ?? "") : "";
+                    if (string.IsNullOrWhiteSpace(title)) continue;
+
+                    var company = item.TryGetProperty("company", out var comp) && comp.TryGetProperty("display_name", out var compName)
+                        ? compName.GetString() ?? "Empresa en Adzuna"
+                        : "Empresa en Adzuna";
+
+                    var jobUrl = item.TryGetProperty("redirect_url", out var u) ? u.GetString() ?? "" : "";
+                    if (string.IsNullOrWhiteSpace(jobUrl)) continue;
+
+                    var location = item.TryGetProperty("location", out var loc) && loc.TryGetProperty("display_name", out var locName)
+                        ? locName.GetString() ?? ""
+                        : "";
+
+                    var id = item.TryGetProperty("id", out var idProp)
+                        ? "adz_" + idProp.GetString()
+                        : "adz_" + Math.Abs(jobUrl.GetHashCode());
+
+                    var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                                   location.Contains("remoto", StringComparison.OrdinalIgnoreCase);
+
+                    if (list.All(x => x.Id != id))
+                    {
+                        var summary = string.IsNullOrWhiteSpace(location)
+                            ? $"{title} en {company}"
+                            : $"{title} en {company} ({location})";
+
+                        list.Add(new JobOffer(
+                            id,
+                            title,
+                            company,
+                            jobUrl,
+                            summary,
+                            DateTime.UtcNow,
+                            Province: location,
+                            City: location,
+                            IsRemote: isRemote
+                        ));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Aviso consultando Adzuna API para '{Query}'.", query);
+            }
+
+            return list;
+        }
+
+        public async Task<List<JobOffer>> FetchInfoJobsJobsAsync(string query, CancellationToken ct)
+        {
+            var list = new List<JobOffer>();
+
+            if (string.IsNullOrWhiteSpace(_config.InfoJobsClientId) || string.IsNullOrWhiteSpace(_config.InfoJobsClientSecret))
+            {
+                _logger.LogWarning("InfoJobs no está configurado (falta InfoJobsClientId/InfoJobsClientSecret en BotConfig); se omite esta fuente.");
+                return list;
+            }
+
+            var url = "https://api.infojobs.net/api/9/offer" +
+                      $"?q={Uri.EscapeDataString(query)}" +
+                      "&maxResults=25" +
+                      "&order=updated-desc";
+
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                var basicAuth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{_config.InfoJobsClientId}:{_config.InfoJobsClientSecret}"));
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", basicAuth);
+                req.Headers.Accept.ParseAdd("application/json");
+                req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
+
+                var response = await _http.SendAsync(req, ct);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync(ct);
+                    _logger.LogWarning("InfoJobs respondió {Status} para '{Query}': {Body}", response.StatusCode, query, body);
+                    return list;
+                }
+
+                var json = await response.Content.ReadAsStringAsync(ct);
+                using var doc = JsonDocument.Parse(json);
+
+                if (!doc.RootElement.TryGetProperty("offers", out var offers))
+                    return list;
+
+                foreach (var item in offers.EnumerateArray())
+                {
+                    var title = item.TryGetProperty("title", out var t) ? CleanHtml(t.GetString() ?? "") : "";
+                    if (string.IsNullOrWhiteSpace(title)) continue;
+
+                    var company = item.TryGetProperty("author", out var author) && author.TryGetProperty("name", out var authorName)
+                        ? authorName.GetString() ?? "Empresa en InfoJobs"
+                        : "Empresa en InfoJobs";
+
+                    var jobUrl = item.TryGetProperty("link", out var l) ? l.GetString() ?? "" : "";
+                    if (string.IsNullOrWhiteSpace(jobUrl)) continue;
+
+                    var descriptionSnippet = item.TryGetProperty("requirementMin", out var reqMin)
+                        ? CleanHtml(reqMin.GetString() ?? "")
+                        : title;
+
+                    var province = item.TryGetProperty("province", out var prov) && prov.TryGetProperty("value", out var provVal)
+                        ? provVal.GetString() ?? ""
+                        : "";
+
+                    var city = item.TryGetProperty("city", out var cProp) ? cProp.GetString() ?? "" : "";
+
+                    var teleworking = item.TryGetProperty("teleworking", out var tw) && tw.TryGetProperty("value", out var twVal)
+                        ? twVal.GetString() ?? ""
+                        : "";
+
+                    var isRemote = teleworking.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                                   teleworking.Contains("teletrabajo", StringComparison.OrdinalIgnoreCase) ||
+                                   title.Contains("remoto", StringComparison.OrdinalIgnoreCase);
+
+                    var id = item.TryGetProperty("id", out var idProp)
+                        ? "ij_" + idProp.GetString()
+                        : "ij_" + Math.Abs(jobUrl.GetHashCode());
+
+                    if (list.All(x => x.Id != id))
+                    {
+                        list.Add(new JobOffer(
+                            id,
+                            title,
+                            company,
+                            jobUrl,
+                            $"{title} en {company}. {descriptionSnippet}",
+                            DateTime.UtcNow,
+                            Province: province,
+                            City: city,
+                            IsRemote: isRemote
+                        ));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Aviso consultando InfoJobs API para '{Query}'.", query);
+            }
+
+            return list;
+        }
+
+        public async Task<List<JobOffer>> FetchGenericFeedsAsync(CancellationToken ct)
+        {
+            var list = new List<JobOffer>();
+
+            foreach (var feedUrl in _config.Feeds ?? new List<string>())
+            {
+                if (ct.IsCancellationRequested) break;
+                if (string.IsNullOrWhiteSpace(feedUrl)) continue;
+
+                try
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Get, feedUrl);
+                    req.Headers.UserAgent.ParseAdd("CareerCopilot-Agent/1.0");
+
+                    var response = await _http.SendAsync(req, ct);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("Feed '{Url}' respondió {Status}.", feedUrl, response.StatusCode);
+                        continue;
+                    }
+
+                    var xml = await response.Content.ReadAsStringAsync(ct);
+                    var xdoc = XDocument.Parse(xml);
+
+                    var items = xdoc.Descendants().Where(e => e.Name.LocalName is "item" or "entry");
+
+                    foreach (var item in items)
+                    {
+                        var title = CleanHtml(item.Elements().FirstOrDefault(e => e.Name.LocalName == "title")?.Value ?? "");
+                        if (string.IsNullOrWhiteSpace(title)) continue;
+
+                        var linkEl = item.Elements().FirstOrDefault(e => e.Name.LocalName == "link");
+                        var link = linkEl?.Attribute("href")?.Value ?? linkEl?.Value ?? "";
+                        if (string.IsNullOrWhiteSpace(link)) continue;
+
+                        var description = CleanHtml(
+                            item.Elements().FirstOrDefault(e => e.Name.LocalName is "description" or "summary" or "content")?.Value
+                            ?? title);
+
+                        var id = "feed_" + Math.Abs((feedUrl + link).GetHashCode());
+
+                        var isRemote = title.Contains("remoto", StringComparison.OrdinalIgnoreCase) ||
+                                       description.Contains("remoto", StringComparison.OrdinalIgnoreCase);
+
+                        if (list.All(x => x.Id != id))
+                        {
+                            var sourceHost = Uri.TryCreate(feedUrl, UriKind.Absolute, out var feedUri) ? feedUri.Host : "Feed";
+                            list.Add(new JobOffer(
+                                id,
+                                title,
+                                sourceHost,
+                                link,
+                                description,
+                                DateTime.UtcNow,
+                                Province: string.Empty,
+                                City: string.Empty,
+                                IsRemote: isRemote
+                            ));
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Aviso consultando el feed '{Url}'.", feedUrl);
+                }
+            }
+
+            return list;
+        }
+
+        private static string CleanHtml(string input)
+        {
+            return Regex.Replace(input, @"<[^>]+>|&nbsp;", " ").Trim();
+        }
     }
 }

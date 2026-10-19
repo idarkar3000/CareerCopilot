@@ -1,11 +1,11 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-COPY ["CareerCopilot.csproj", "./"]
-RUN dotnet restore "CareerCopilot.csproj"
+COPY CareerCopilot/CareerCopilot.csproj CareerCopilot/
+RUN dotnet restore CareerCopilot/CareerCopilot.csproj
 
-COPY . .
-RUN dotnet publish "CareerCopilot.csproj" -c Release -o /app/publish /p:UseAppHost=false
+COPY CareerCopilot/ CareerCopilot/
+RUN dotnet publish CareerCopilot/CareerCopilot.csproj -c Release -o /app/publish /p:UseAppHost=false
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
